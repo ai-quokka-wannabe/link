@@ -1,0 +1,17 @@
+/build
+/.qtcreator
+/.vs
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# Cargo build output.
+/target
+
+# Tool virtual environment. The directory is tracked so the convention is visible;
+# its contents are not.
+/tools/.venv/*
+!/tools/.venv/.gitkeep
+
+# Bytecode, which appears as soon as anything imports a tool rather than running it.
+__pycache__/
+*.pyc

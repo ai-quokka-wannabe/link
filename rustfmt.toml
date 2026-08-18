@@ -1,0 +1,2 @@
+# The organisation's 170-column limit, as .clang-format sets it for the flagship.
+max_width = 170
