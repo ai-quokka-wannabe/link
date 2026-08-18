@@ -1,0 +1,19 @@
+[package]
+name = "link"
+version = "0.0.0"
+edition = "2024"
+description = "The wire of the Grid: the protocol library Master Control and TronGrid Lite both load."
+license = "GPL-3.0-or-later"
+repository = "https://github.com/ai-quokka-wannabe/link"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# The flagship builds under /WX and -Werror; this is the same rule spelt in Cargo.
+[lints.rust]
+warnings = "deny"
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

@@ -1,0 +1,119 @@
+name: CI - Pull Request
+
+permissions:
+    contents: read
+
+on:
+    pull_request:
+        branches: ["**"]
+
+# A new push to a pull request makes the previous run's result irrelevant, so stop paying for it.
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    quick-checks:
+        name: Quick Checks (markdown)
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            - name: Setup Node.js
+              id: setup-node
+              uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+              with:
+                node-version: "lts/*"
+
+            - name: Get markdownlint-cli2 version
+              id: mdlint-version
+              run: echo "version=$(npm view markdownlint-cli2 version)" >> "$GITHUB_OUTPUT"
+
+            # Restore cache from main branch (read-only)
+            - name: Restore npm cache
+              uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+              with:
+                path: ~/.npm
+                key: npm-markdownlint-${{ runner.os }}-node-${{ steps.setup-node.outputs.node-version }}-mdlint-${{ steps.mdlint-version.outputs.version }}
+
+            - name: Install markdownlint-cli2
+              run: npm install -g markdownlint-cli2@${{ steps.mdlint-version.outputs.version }}
+
+            - name: Lint markdown
+              run: markdownlint-cli2 "**/*.md"
+
+            # A carriage return sitting inside a line is invisible in every editor, survives
+            # rustfmt and markdownlint, and reads as ordinary text in review. Three reached the
+            # flagship's main before this step existed there, each one a Doxygen \return written
+            # through a tool chain that collapsed the escape, leaving a control character and a
+            # word reading "eturn" where the tag should be.
+            #
+            # .gitattributes normalises to LF and this runner is Linux, so the checkout contains
+            # no legitimate carriage return at all and any match is a stray. -I skips binary
+            # files, and taking the file list from git keeps build outputs and untracked scratch
+            # out of it.
+            - name: Check for stray carriage returns
+              run: |
+                if git ls-files -z | xargs -0 grep -lIP '\r'; then
+                    echo "::error::The files above contain a carriage return. Line endings here are LF, so it is a stray one inside a line - look for a text written through a tool that ate an escape."
+                    exit 1
+                fi
+
+    build:
+        name: Build (${{ matrix.os }})
+        needs: quick-checks
+        timeout-minutes: 15
+
+        strategy:
+            fail-fast: false
+
+            matrix:
+                os: [ubuntu-latest, windows-latest]
+
+        runs-on: ${{ matrix.os }}
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            # The runners ship a Rust toolchain, but an image refresh can lag a release; updating
+            # to current stable makes the toolchain a fact of this run rather than of the image.
+            - name: Update the stable toolchain
+              run: |
+                rustup update --no-self-update stable
+                rustup default stable
+                cargo --version
+                rustc --version
+
+            - name: Formatting must be canonical
+              run: cargo fmt --check
+
+            - name: Clippy, warnings as errors
+              run: cargo clippy --all-targets -- --deny warnings
+
+            - name: Build (Release)
+              run: cargo build --release
+
+            - name: Test
+              run: cargo test
+
+    # The flagship also runs sanitiser jobs and a software-Vulkan verification job. Neither
+    # transfers: nothing here needs a device, and Rust's sanitisers require the nightly
+    # toolchain, which this repository does not use.
+    ci-success:
+        name: CI Success
+        needs: [quick-checks, build]
+        runs-on: ubuntu-latest
+        if: always()
+
+        steps:
+            - name: Check if all jobs succeeded
+              run: |
+                if [[ "${{ needs.quick-checks.result }}" != "success" ]] || \
+                   [[ "${{ needs.build.result }}" != "success" ]]; then
+                    echo "One or more jobs failed"
+                    exit 1
+                fi
+                echo "All jobs completed successfully"
