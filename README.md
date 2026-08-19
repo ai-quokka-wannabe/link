@@ -48,7 +48,9 @@ Rust stable 1.85 or later (edition 2024), via [rustup](https://rustup.rs/). Noth
 The contract is pinned: `include/lnk/lnk_protocol.h` carries the framing, nine of the ten
 messages as no-padding PODs, and the fingerprint the handshake refuses mismatches with —
 mirrored field for field and size-asserted again in `src/protocol.rs`, guarded in CI by
-`tools/check_protocol_version.py`. REZ's payload layout is deliberately still open: it flattens
+`tools/check_protocol_version.py`. The codec turns frames into messages by refusal, and the
+transport carries them over TCP — a mismatched contract is refused at the handshake in words a
+human can read. REZ's payload layout is deliberately still open: it flattens
 the flagship's creature descriptor and is designed against that validator, not guessed here. The
 roadmap lives in [TODO.md](TODO.md), the history in [CHANGELOG.md](CHANGELOG.md).
 

@@ -22,6 +22,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Actions lockdown, CodeQL default setup) were replicated through the API in the same sweep and
   verified byte-identical to the flagship's.
 
+- **Etape 3: the transport — the socket the codec's refusals guard.** `src/transport.rs`:
+  `std::net` TCP with `TCP_NODELAY` on both ends and no threads — each consumer owns its loop
+  and turns a state machine. The handshake is blocking and timeout-bounded: magic, HELLO, then
+  WELCOME — or a refusal in words, sent as UTF-8 text before the connection closes, because a
+  refusal happens exactly when the two ends have not agreed they speak the same frames, so a
+  frame could not carry it. The refusal names both protocol versions, travels to the client
+  verbatim, and the convention is documented in the header (a comment-only change, which the
+  fingerprint provably ignores). After the handshake the connection is non-blocking:
+  `Connection::poll` judges type and length at the header — a hostile length hangs up before a
+  single payload byte is read — and never reads past the frame it is assembling; `queue` and
+  `flush` coalesce everything into one write per tick, carrying partial-write remainders. The
+  build knows its own contract: the recorded fingerprint is compiled into the library,
+  `local_hello` carries it and `accept` compares against it, so the repository guard, the
+  handshake token and the binary are one thing. Seven transport tests run over real loopback
+  sockets — refusals crossing the wire, a frame dribbled one byte at a time, ordered delivery
+  of a coalesced burst — plus a deterministic slow-sink test for the write carry. Broken
+  deliberately three times, each caught by exactly the test that guards it.
+
 - **Etape 2: the codec — bytes to messages, by refusal.** `src/codec.rs` turns frames into
   messages and back with pure functions: no sockets, no `unsafe`, no allocation before
   validation, every field read and written in explicit little-endian so nothing ever
