@@ -11,9 +11,12 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 # The flagship builds under /WX and -Werror; this is the same rule spelt in Cargo.
+# unsafe is denied rather than forbidden so that exactly one module - src/abi.rs, the C
+# boundary, whose whole job is the unsafety - may allow it locally. Everywhere else it stays
+# refused.
 [lints.rust]
 warnings = "deny"
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }

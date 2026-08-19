@@ -50,7 +50,9 @@ messages as no-padding PODs, and the fingerprint the handshake refuses mismatche
 mirrored field for field and size-asserted again in `src/protocol.rs`, guarded in CI by
 `tools/check_protocol_version.py`. The codec turns frames into messages by refusal, and the
 transport carries them over TCP — a mismatched contract is refused at the handshake in words a
-human can read. REZ's payload layout is deliberately still open: it flattens
+human can read. The built library exports one symbol, `lnkGetClientVTable`
+(`include/lnk/lnk_client.h`), behind which the whole client lives; no panic ever crosses it.
+REZ's payload layout is deliberately still open: it flattens
 the flagship's creature descriptor and is designed against that validator, not guessed here. The
 roadmap lives in [TODO.md](TODO.md), the history in [CHANGELOG.md](CHANGELOG.md).
 

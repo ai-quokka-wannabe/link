@@ -44,10 +44,20 @@ fingerprint comparison, a dropped partial-write carry, a forgotten partial heade
 
 ## Etape 4 — the C ABI surface
 
-The narrow exported surface — open, poll, send, close, over byte buffers — with `catch_unwind`
-at every boundary and error codes rather than unwinding, packaged as the `cdylib` both consumers
-load. This is the etape where `unsafe` enters the crate, narrowly, and where the manifest's
-`unsafe_code = "forbid"` relaxes to a per-module allowance.
+**Done, for the client half.** `include/lnk/lnk_client.h` declares the surface and `src/abi.rs`
+implements it: one exported symbol, `lnkGetClientVTable`, returning NULL for any version but its
+own — the flagship's `tglGetProgramVTable` refusal, reproduced — with `vtable_bytes` and
+`abi_version` as the table's first members. Behind it: connect (the whole handshake, refusals
+arriving as words in the caller's buffer), poll (message views with TICK_STATE rows borrowed
+until the next poll, the Program ABI's own borrow rules), send_actions/ping/pong, flush, close.
+Every function wraps in `catch_unwind` and answers with a status code; null pointers earn
+`LNK_BAD_ARGUMENT` rather than a dereference. `unsafe` entered the crate exactly as planned: the
+manifest relaxed from forbid to deny, and `src/abi.rs` alone allows it. The header's status
+constants are pinned to the Rust constants by a test that parses the header itself — the
+cross-language twin check, no C compiler required — and the built `link.dll` was loaded through
+`ctypes` to prove the export and the version refusal from a real foreign runtime. The
+**server half** — listen and accept behind the same vtable style — arrives with Master
+Control's consumer etape, which is the first code that could call it.
 
 ## Etape 5 — the first consumer
 
