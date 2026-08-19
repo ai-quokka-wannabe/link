@@ -68,7 +68,15 @@ extern "C"
 */
 
 /*! The first four bytes a client ever sends: 'L' 'N' 'K' '1' on the wire. Anything else earns a
-    refusal and a closed connection before any frame is read. */
+    refusal and a closed connection before any frame is read.
+
+    The handshake, in full: the client sends the magic, then a HELLO frame; the server answers
+    with a WELCOME frame and the connection is framed from then on. A server that refuses - bad
+    magic, wrong fingerprint, invalid role - sends a short UTF-8 line ending in '\n' and closes.
+    The refusal is text rather than a frame, deliberately: it happens before the two ends have
+    agreed they speak the same frames, which is exactly when a frame could not be trusted. A
+    client therefore treats bytes received after its HELLO as either a WELCOME frame or, if the
+    connection then closes, a refusal to put in its log verbatim. */
 #define LNK_PROTOCOL_MAGIC_BYTE_0 0x4Cu
 #define LNK_PROTOCOL_MAGIC_BYTE_1 0x4Eu
 #define LNK_PROTOCOL_MAGIC_BYTE_2 0x4Bu

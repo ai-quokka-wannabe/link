@@ -30,8 +30,17 @@ an off-by-one at the exact cap boundary.
 
 ## Etape 3 — the transport
 
-`std::net` TCP with `TCP_NODELAY`, the fingerprint handshake refusal, and the tick-stamped
-latest-wins delivery semantics.
+**Done.** `src/transport.rs`: `std::net` TCP with `TCP_NODELAY` on both ends, a timeout-bounded
+blocking handshake — magic, HELLO, WELCOME, or a refusal in words, text-then-close, documented
+in the header — then a non-blocking framed phase with no threads: `Connection::poll` returns
+whole frames or nothing, judges type and length at the header before any payload byte is read,
+and hangs up on anything the contract refuses. Writes coalesce into one flush per tick with
+partial-write remainders carried. The build knows its own contract: the recorded fingerprint is
+compiled in, `local_hello` carries it, `accept` compares against it. Latest-wins stays the
+consumer's step rule; the transport's obligation — ordered, whole, tick-stamped frames — is
+tested over real loopback sockets, including a frame dribbled one byte at a time and a hostile
+length hung up at the header. Broken deliberately three times, each discriminating: an inverted
+fingerprint comparison, a dropped partial-write carry, a forgotten partial header.
 
 ## Etape 4 — the C ABI surface
 
