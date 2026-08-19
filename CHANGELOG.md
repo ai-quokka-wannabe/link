@@ -22,6 +22,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Actions lockdown, CodeQL default setup) were replicated through the API in the same sweep and
   verified byte-identical to the flagship's.
 
+- **Etape 2: the codec — bytes to messages, by refusal.** `src/codec.rs` turns frames into
+  messages and back with pure functions: no sockets, no `unsafe`, no allocation before
+  validation, every field read and written in explicit little-endian so nothing ever
+  reinterprets memory. The audit's gold-plated rule is an API shape — `payload_rule` and
+  `check_length` answer from the three header bytes alone, so a hostile length is refused
+  before a byte of payload is read — and `decode` re-checks rather than trusts, because "the
+  caller surely validated" is how parsers die. Strictness is symmetric: `encode` refuses every
+  frame `decode` would refuse (bad roles, unknown event kinds, nonzero reserved bytes, a
+  TICK_STATE header lying about its own row count) and a refused encode writes nothing. The
+  decoder never panics on any input, demonstrated by bombardment with deterministic junk at
+  every legal length and type byte. Thirteen tests; three deliberate breakages, each caught by
+  exactly the test that guards it — including an off-by-one at the 256-row cap boundary, which
+  the round-trip suite holds at the boundary precisely so that mistake is representable only as
+  a red.
+
 - **Etape 1: the Link protocol contract.** `include/lnk/lnk_protocol.h` is the contract of
   record — the `LNK1` magic, the three-byte `u16 length | u8 type` little-endian framing
   (deliberately no header struct: C would pad it), an exact-size rule for every fixed message

@@ -19,10 +19,14 @@ payload is Etape 6 below.
 
 ## Etape 2 — the codec
 
-Encode and decode against hostile bytes: caps checked before any copy, every decode a total
-function that returns refusal rather than trusting a field. Red-first, in the house manner: the
-breakage round feeds the decoder truncated, oversized and misdeclared frames and watches it
-refuse each one before the happy path is believed.
+**Done.** `src/codec.rs`: pure functions, no I/O, no `unsafe` — every field read and written in
+explicit little-endian, so nothing reinterprets memory. The before-any-copy gate is an API shape
+(`payload_rule` and `check_length` answer from the three header bytes alone), strictness is
+symmetric (encode refuses everything decode refuses, and a refused encode writes nothing),
+reserved bytes must be zero, and the decoder never panics on any input — a bombardment test
+proves it with deterministic junk at every length and type byte. Broken deliberately three
+times, each discriminating: a silenced reserved-zero check, a swapped field pair in encode, and
+an off-by-one at the exact cap boundary.
 
 ## Etape 3 — the transport
 
