@@ -22,6 +22,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Actions lockdown, CodeQL default setup) were replicated through the API in the same sweep and
   verified byte-identical to the flagship's.
 
+- **Etape 4: the C ABI surface — the library a foreign runtime loads.**
+  `include/lnk/lnk_client.h` declares it and `src/abi.rs` implements it: one exported symbol,
+  `lnkGetClientVTable`, returning the table for its own version and NULL for any other — the
+  flagship's `tglGetProgramVTable` refusal reproduced, with `vtable_bytes` and `abi_version` as
+  the first two members. Behind the table: connect (the whole handshake; a server's refusal
+  arrives as words in the caller's buffer), poll (message views, with TICK_STATE rows borrowed
+  until the next poll — the Program ABI's borrow rules), send_actions, send_ping, send_pong,
+  flush, close. Every function wraps in `catch_unwind` and answers with a status code — no
+  panic crosses the boundary, and `connect` pre-writes `LNK_PANIC` into the status so even a
+  caught unwind leaves the truth behind. Null pointers earn `LNK_BAD_ARGUMENT` rather than a
+  dereference. `unsafe` entered the crate exactly as the plan said it would: the manifest
+  relaxed from forbid to deny, `src/abi.rs` alone allows it, and every unsafe block carries a
+  SAFETY comment naming the contract that licenses it. The header's constants are pinned to the
+  Rust constants by a test that parses the header itself — cross-language twinning with no C
+  compiler — and the built `link.dll` was loaded through Python's ctypes to prove the export,
+  the vtable's 80 bytes and the version refusal from a genuinely foreign runtime. Twenty-five
+  tests; three discriminating breakage rounds (a drifted status constant, a version gate that
+  accepted strangers, a refusal laundered into an io error) — plus one stale-binary catch by
+  the house rule itself, when an Etape-1-era DLL nearly stood in for the fresh one. The server
+  half of the surface — listen and accept — waits for Master Control's consumer etape.
+
 - **The flagship's release workflow, adopted.** Tag-triggered in the same shape:
   the tag's version must match `Cargo.toml` before anything builds; the release build runs the
   full test suite and the fingerprint check before anything is signed, because a tag can be

@@ -30,8 +30,9 @@ capitalised like Master Control; `link`, lowercase, names only this repository. 
   `[dependencies]` is a design failure here. Rust-the-language, not Rust-the-ecosystem.
 - **Warnings are errors**, denied in `Cargo.toml` `[lints]` rather than in CI flags, so local
   builds and CI agree. The flagship builds under `/WX` and `-Werror`; this is the same rule.
-- **`unsafe` is forbidden in the manifest today.** The eventual `extern "C"` ABI layer is the
-  only place it may enter, narrowly, when that etape arrives.
+- **`unsafe` is denied in the manifest and allowed in exactly one module**: `src/abi.rs`, the C
+  boundary, whose whole job is the unsafety. Every unsafe block there carries a SAFETY comment
+  naming the contract that licenses it. Everywhere else, unsafe stays refused.
 - **No panic crosses the C ABI, ever.** Every exported function catches unwinding at the
   boundary and returns an error code — the flagship's noexcept doctrine in Rust clothing, and
   its "the boundary is a `catch (...)` that nothing can be added outside of" pattern

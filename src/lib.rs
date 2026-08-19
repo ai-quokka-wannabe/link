@@ -6,6 +6,7 @@
 //! `tron-grid-lite` repository. Design changes land there before code lands here. The contract
 //! of record is the C header, `include/lnk/lnk_protocol.h`; [`protocol`] mirrors it.
 
+pub mod abi;
 pub mod codec;
 pub mod protocol;
 pub mod transport;
