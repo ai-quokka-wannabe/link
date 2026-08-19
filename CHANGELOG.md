@@ -22,6 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Actions lockdown, CodeQL default setup) were replicated through the API in the same sweep and
   verified byte-identical to the flagship's.
 
+- **The flagship's release workflow, adopted.** Tag-triggered in the same shape:
+  the tag's version must match `Cargo.toml` before anything builds; the release build runs the
+  full test suite and the fingerprint check before anything is signed, because a tag can be
+  pushed from any commit and an attestation must never vouch for an untested artefact; the
+  artefact is the loaded contract itself — `link.dll`/`liblink.so`, the C header, the recorded
+  fingerprint, plus README, LICENCE and CHANGELOG — with SHA-256 checksums, build provenance
+  attested, and release notes extracted from this file. Same pinned GitHub-owned actions, same
+  gh-CLI publishing.
+
 - **Etape 3: the transport — the socket the codec's refusals guard.** `src/transport.rs`:
   `std::net` TCP with `TCP_NODELAY` on both ends and no threads — each consumer owns its loop
   and turns a state machine. The handshake is blocking and timeout-bounded: magic, HELLO, then
