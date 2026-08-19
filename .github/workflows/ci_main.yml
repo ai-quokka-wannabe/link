@@ -64,6 +64,14 @@ jobs:
                     exit 1
                 fi
 
+            # LNK_PROTOCOL_VERSION stops two ends of the wire shaking hands on a number while
+            # disagreeing about the bytes, and nothing enforces it by itself. So the header is
+            # fingerprinted with the version line removed, and a changed fingerprint at an
+            # unchanged version is refused here rather than in a reviewer's memory - the same
+            # mechanism, and the same fingerprint, the handshake itself carries.
+            - name: Check the Link protocol version was bumped
+              run: python3 tools/check_protocol_version.py check
+
     build:
         name: Build (${{ matrix.os }})
         needs: quick-checks

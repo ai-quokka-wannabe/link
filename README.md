@@ -1,6 +1,7 @@
 # link
 
-The wire of the Grid.
+**Link** — the wire of the Grid. Link is the library's official name, capitalised the way Master
+Control is; `link`, lowercase, names only this repository.
 
 One protocol library that Master Control and every TronGrid Lite instance load as the same
 shared binary — Rust behind a plain C ABI — so the two ends of the wire cannot drift apart:
@@ -44,8 +45,12 @@ Rust stable 1.85 or later (edition 2024), via [rustup](https://rustup.rs/). Noth
 
 ## Where It Stands
 
-The scaffold stands and CI is green; the wire contract is the first etape. The roadmap lives in
-[TODO.md](TODO.md), the history in [CHANGELOG.md](CHANGELOG.md).
+The contract is pinned: `include/lnk/lnk_protocol.h` carries the framing, nine of the ten
+messages as no-padding PODs, and the fingerprint the handshake refuses mismatches with —
+mirrored field for field and size-asserted again in `src/protocol.rs`, guarded in CI by
+`tools/check_protocol_version.py`. REZ's payload layout is deliberately still open: it flattens
+the flagship's creature descriptor and is designed against that validator, not guessed here. The
+roadmap lives in [TODO.md](TODO.md), the history in [CHANGELOG.md](CHANGELOG.md).
 
 ## Licence
 

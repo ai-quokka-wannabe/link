@@ -22,6 +22,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Actions lockdown, CodeQL default setup) were replicated through the API in the same sweep and
   verified byte-identical to the flagship's.
 
+- **Etape 1: the Link protocol contract.** `include/lnk/lnk_protocol.h` is the contract of
+  record — the `LNK1` magic, the three-byte `u16 length | u8 type` little-endian framing
+  (deliberately no header struct: C would pad it), an exact-size rule for every fixed message
+  checked before any copy, and nine of the ten messages as no-padding PODs: HELLO (version,
+  fingerprint, role), WELCOME (tick, dt, client id), TICK_STATE (header plus forty-byte
+  creature rows, capped at 256 to fit one frame four times over), ACTIONS (the ABI's twelve
+  bytes plus tick and address), EVENT, DEREZ, PING/PONG, BYE. Zero is never a valid type, role
+  or kind, so a zeroed buffer refuses instead of meaning something. REZ's number is reserved
+  and its layout deferred to its own etape: it flattens the flagship's pointer-carrying
+  creature descriptor and is designed against that validator, not guessed. The header is
+  fingerprinted by `tools/check_protocol_version.py` — the flagship's ABI tool, adapted — and
+  checked in CI; the same fingerprint is what HELLO carries, so the repository guard and the
+  handshake refusal are one mechanism. `src/protocol.rs` mirrors every struct with the same
+  sizes pinned by const asserts and refuses big-endian hosts outright. Broken deliberately
+  once each, all discriminating: the Rust size pin, the unbumped-header refusal, the
+  same-version update refusal, the stale-fingerprint refusal. And the library's name is
+  official: **Link**, capitalised like Master Control — `link` names only the repository.
+
 - **The wire has a face: README and TODO.** The README states the identity — one binary loaded
   by both ends, Rust behind a plain C ABI, `std` only — the doctrine behind each of those
   choices, and the family, with the flagship's `docs/TOPOLOGY.md` named as the design authority
