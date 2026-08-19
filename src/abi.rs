@@ -386,9 +386,9 @@ mod tests {
 
     fn vtable() -> &'static LnkClientVTable {
         let table = lnkGetClientVTable(LNK_CLIENT_ABI_VERSION);
-        assert!(!table.is_null());
-        // SAFETY: the pointer is the static VTABLE, alive for the program's whole life.
-        unsafe { &*table }
+        // SAFETY: as_ref is the null check and the dereference in one inseparable expression;
+        // the non-null pointer is the static VTABLE, alive for the program's whole life.
+        unsafe { table.as_ref() }.expect("the library must satisfy its own version")
     }
 
     #[test]
