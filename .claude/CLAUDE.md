@@ -1,8 +1,10 @@
 # link
 
-The wire of the Grid: the protocol library that Master Control and every TronGrid Lite instance
-load as the same shared binary, so the two ends of the wire cannot disagree about what travels
-over it. Rust behind a plain C ABI.
+**Link** — the wire of the Grid: the protocol library that Master Control and every TronGrid
+Lite instance load as the same shared binary, so the two ends of the wire cannot disagree about
+what travels over it. Rust behind a plain C ABI. Link is the library's official name,
+capitalised like Master Control; `link`, lowercase, names only this repository. The C prefix is
+`Lnk`/`LNK_`, and the contract of record is `include/lnk/lnk_protocol.h`.
 
 **Two facts that govern every decision in this repo:**
 
