@@ -34,8 +34,8 @@ jobs:
               id: mdlint-version
               run: echo "version=$(npm view markdownlint-cli2 version)" >> "$GITHUB_OUTPUT"
 
-            # Restore cache from main branch (read-only)
             - name: Restore npm cache
+              id: npm-cache-restore
               uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
                 path: ~/.npm
@@ -71,6 +71,13 @@ jobs:
             # mechanism, and the same fingerprint, the handshake itself carries.
             - name: Check the Link protocol version was bumped
               run: python3 tools/check_protocol_version.py check
+
+            - name: Save npm cache
+              if: steps.npm-cache-restore.outputs.cache-hit != 'true'
+              uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+              with:
+                path: ~/.npm
+                key: npm-markdownlint-${{ runner.os }}-node-${{ steps.setup-node.outputs.node-version }}-mdlint-${{ steps.mdlint-version.outputs.version }}
 
     build:
         name: Build (${{ matrix.os }})
