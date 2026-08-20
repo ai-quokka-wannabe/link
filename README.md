@@ -43,6 +43,18 @@ cargo test
 
 Rust stable 1.85 or later (edition 2024), via [rustup](https://rustup.rs/). Nothing else.
 
+## Consuming From CMake
+
+A CMake consumer never learns cargo exists: `add_subdirectory()` this repository and it offers
+exactly three things — the header target `lnk` (link against it like any other library; headers
+only, because nothing links Link at build time), the residence-rule function
+`lnk_copy_beside(<target>)` (copies the built library beside the executable that loads it), and
+the `LNK_LIBRARY_FILE`/`LNK_FINGERPRINT_FILE` paths for tests that pin against them.
+`LANGUAGES NONE`, so consuming Link enables no compiler in the consumer's build. The flagship is
+the living example — and Link's own CI and release pipeline build through this same face on both
+platforms, so it cannot rot: it is the build, not a side check.
+`cmake --workflow --preset default` is the whole ceremony, presets in the flagship's manner.
+
 ## Where It Stands
 
 The contract is pinned: `include/lnk/lnk_protocol.h` carries the framing, nine of the ten

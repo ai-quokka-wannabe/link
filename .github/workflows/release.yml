@@ -94,8 +94,10 @@ jobs:
                 cargo --version
                 rustc --version
 
-            - name: Build release binary
-              run: cargo build --release
+            # The release builds through the CMake face too - the same two files any consumer
+            # uses - so what ships is what the face produces, not a parallel path.
+            - name: Build release binary through the CMake face
+              run: cmake --workflow --preset default
 
             # A tag can be pushed from any commit, including one that never reached main or that
             # sat between a red CI run and its fix. Without this the workflow would happily build,

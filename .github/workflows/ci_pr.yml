@@ -101,8 +101,12 @@ jobs:
             - name: Clippy, warnings as errors
               run: cargo clippy --all-targets -- --deny warnings
 
-            - name: Build (Release)
-              run: cargo build --release
+            # The build goes through the CMake face - the same two files any consumer uses -
+            # so the face cannot rot: it is the pipeline, on both platforms, not a side check.
+            # LANGUAGES NONE means no compiler is probed and no VS environment is needed; the
+            # library lands in target/release exactly as a direct cargo build would put it.
+            - name: Build through the CMake face
+              run: cmake --workflow --preset default
 
             - name: Test
               run: cargo test

@@ -41,6 +41,11 @@ capitalised like Master Control; `link`, lowercase, names only this repository. 
   document).
 - **Vocabulary:** Tron terms, one word per concept — the Grid, Program, creature, User, Master
   Control, tick, senses, actions. The flagship's STYLE.md § Tron Naming is authoritative.
+- **The CMake face is a published contract.** `CMakeLists.txt` exports exactly three things —
+  the `lnk` header target, `lnk_copy_beside()`, and the two `LNK_*` path variables — and
+  consumers build against them, so renaming or removing any is a breaking change to every
+  consumer. Change them the way the wire is changed: deliberately, and with the flagship's
+  consumption in view. The face stays `LANGUAGES NONE` and never grows compiler knowledge.
 - **Formatting:** `cargo fmt` (`rustfmt.toml`, 170-column limit). Clippy clean.
 - **Licence:** GPL v3-or-later.
 - **Don't over-engineer.** Keep it simple. No abstractions until there's a concrete second use
