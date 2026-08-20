@@ -29,8 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fresh Link beside a stale executable), and the `LNK_LIBRARY_FILE`/`LNK_FINGERPRINT_FILE`
   paths for tests. `project(Link LANGUAGES NONE)`, deliberately: consuming Link enables no
   compiler in the consumer's build, and the owner's aim is exact — the flagship consumes the
-  wire as though it were just another shared library, oblivious to how it is made. Link's own
-  CI builds the face standalone on every push, so the claim is checked rather than remembered.
+  wire as though it were just another shared library, oblivious to how it is made. The face
+  carries its own `CMakePresets.json` in the flagship's manner, sized to what the face is: one
+  configure preset, one build preset, one workflow, so `cmake --workflow --preset default` is
+  the whole standalone ceremony — which is exactly what Link's own CI runs on every push, so
+  the claim is checked rather than remembered.
 
 - **Etape 4: the C ABI surface — the library a foreign runtime loads.**
   `include/lnk/lnk_client.h` declares it and `src/abi.rs` implements it: one exported symbol,

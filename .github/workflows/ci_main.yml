@@ -122,9 +122,7 @@ jobs:
             # is checked rather than remembered.
             - name: The CMake face builds standalone (Linux)
               if: runner.os == 'Linux'
-              run: |
-                cmake -S . -B build-cmake
-                cmake --build build-cmake
+              run: cmake --workflow --preset default
 
     # The flagship also runs sanitiser jobs and a software-Vulkan verification job. Neither
     # transfers: nothing here needs a device, and Rust's sanitisers require the nightly

@@ -15,5 +15,5 @@
 # Bytecode, which appears as soon as anything imports a tool rather than running it.
 __pycache__/
 *.pyc
-# The CMake face smoke build, from CI or from curiosity.
-/build-cmake
+# The CMake face, built through its preset - from CI or from curiosity.
+/build

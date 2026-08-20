@@ -51,7 +51,8 @@ only, because nothing links Link at build time), the residence-rule function
 `lnk_copy_beside(<target>)` (copies the built library beside the executable that loads it), and
 the `LNK_LIBRARY_FILE`/`LNK_FINGERPRINT_FILE` paths for tests that pin against them.
 `LANGUAGES NONE`, so consuming Link enables no compiler in the consumer's build. The flagship is
-the living example, and Link's own CI builds this face standalone so it cannot silently rot.
+the living example, and Link's own CI builds this face standalone so it cannot silently rot —
+`cmake --workflow --preset default` is the whole ceremony, presets in the flagship's manner.
 
 ## Where It Stands
 
