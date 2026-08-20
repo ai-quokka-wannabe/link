@@ -111,18 +111,15 @@ jobs:
             - name: Clippy, warnings as errors
               run: cargo clippy --all-targets -- --deny warnings
 
-            - name: Build (Release)
-              run: cargo build --release
+            # The build goes through the CMake face - the same two files any consumer uses -
+            # so the face cannot rot: it is the pipeline, on both platforms, not a side check.
+            # LANGUAGES NONE means no compiler is probed and no VS environment is needed; the
+            # library lands in target/release exactly as a direct cargo build would put it.
+            - name: Build through the CMake face
+              run: cmake --workflow --preset default
 
             - name: Test
               run: cargo test
-
-            # The CMake face is how the flagship consumes this repository while staying oblivious
-            # to cargo; it must therefore keep building standalone, and this is where that claim
-            # is checked rather than remembered.
-            - name: The CMake face builds standalone (Linux)
-              if: runner.os == 'Linux'
-              run: cmake --workflow --preset default
 
     # The flagship also runs sanitiser jobs and a software-Vulkan verification job. Neither
     # transfers: nothing here needs a device, and Rust's sanitisers require the nightly

@@ -32,8 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wire as though it were just another shared library, oblivious to how it is made. The face
   carries its own `CMakePresets.json` in the flagship's manner, sized to what the face is: one
   configure preset, one build preset, one workflow, so `cmake --workflow --preset default` is
-  the whole standalone ceremony — which is exactly what Link's own CI runs on every push, so
-  the claim is checked rather than remembered.
+  the whole standalone ceremony — and it is not a side check but the pipeline itself: the CI
+  build jobs on both platforms and the release workflow all build Link through the face, the
+  direct cargo build step retired, so what CI proves and what a consumer runs are one path.
 
 - **Etape 4: the C ABI surface — the library a foreign runtime loads.**
   `include/lnk/lnk_client.h` declares it and `src/abi.rs` implements it: one exported symbol,
