@@ -22,6 +22,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Actions lockdown, CodeQL default setup) were replicated through the API in the same sweep and
   verified byte-identical to the flagship's.
 
+- **The server half, and the first real protocol bump.** The vtable grows Master Control's end
+  of the wire — `listen` (127.0.0.1 only while the trust stance holds; port 0 asks the
+  operating system and `server_port` answers which), `accept` (one knock if somebody knocked,
+  the whole handshake walked with refusals in words, `LNK_NOTHING_YET` when nobody is waiting),
+  `send_welcome`, `send_tick_state`, `send_event` and `send_derez` — at client ABI version 2,
+  with version 1 refused as history. It arrived earlier than the plan said because its first
+  consumer turned out to be the flagship spectator's own test rather than Master Control: a
+  spectator needs somebody to talk to, and a hand-written test server would be the second
+  implementation this organisation forbids; Master Control simply inherits the half ready-made.
+  `send_tick_state` judges the caller's declared count against the cap *before reading a single
+  row* — the wire's validate-before-copy rule applied to our own caller with exactly the trust
+  a stranger would get. And `LNK_DEFAULT_PORT` landed in the protocol header: **30702**, from
+  JA-307020 — Tron's designation, the security program guarding the doorway into the Grid —
+  taking the protocol to **version 2**, the fingerprint flow's first exercise in anger, with a
+  new twin test pinning version and port between the header and the Rust mirror. Thirty tests;
+  three discriminating breakage rounds (a no-knock that answered OK, an inverted count gate, a
+  version gate that let history in) — plus one breakage round of my own restoration discipline,
+  when an unasserted restore left a round applied and the suite caught it immediately.
+
 - **The CMake face: a consumer never learns cargo exists.** `CMakeLists.txt` at the root is the
   face Link shows a CMake consumer — `add_subdirectory()` it and receive exactly three things:
   the header target `lnk`, the residence-rule function `lnk_copy_beside(<target>)` (an ALL

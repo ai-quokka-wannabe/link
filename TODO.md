@@ -56,8 +56,14 @@ manifest relaxed from forbid to deny, and `src/abi.rs` alone allows it. The head
 constants are pinned to the Rust constants by a test that parses the header itself — the
 cross-language twin check, no C compiler required — and the built `link.dll` was loaded through
 `ctypes` to prove the export and the version refusal from a real foreign runtime. The
-**server half** — listen and accept behind the same vtable style — arrives with Master
-Control's consumer etape, which is the first code that could call it.
+**server half** arrived earlier than planned — listen, accept, server_port and the four
+server-side sends behind the same vtable, at ABI version 2 — because its first consumer turned
+out to be the spectator's own test rather than Master Control: a spectator needs somebody to
+talk to, and a hand-written test server would be the second implementation this organisation
+forbids. The listener binds 127.0.0.1 only while the trust stance holds, and
+`LNK_DEFAULT_PORT` (30702, Tron's designation guarding the doorway) landed in the protocol
+header with it — the first real protocol bump, version 2, the fingerprint flow exercised in
+anger.
 
 ## Etape 5 — the first consumer
 

@@ -63,7 +63,9 @@ mirrored field for field and size-asserted again in `src/protocol.rs`, guarded i
 `tools/check_protocol_version.py`. The codec turns frames into messages by refusal, and the
 transport carries them over TCP — a mismatched contract is refused at the handshake in words a
 human can read. The built library exports one symbol, `lnkGetClientVTable`
-(`include/lnk/lnk_client.h`), behind which the whole client lives; no panic ever crosses it.
+(`include/lnk/lnk_client.h`), behind which both ends of the wire live — the connecting client
+and the listening server, localhost-only while the trust stance holds; no panic ever crosses
+it, and the default port is 30702, Tron's own designation guarding the doorway.
 REZ's payload layout is deliberately still open: it flattens
 the flagship's creature descriptor and is designed against that validator, not guessed here. The
 roadmap lives in [TODO.md](TODO.md), the history in [CHANGELOG.md](CHANGELOG.md).

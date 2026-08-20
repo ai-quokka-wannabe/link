@@ -13,7 +13,7 @@
 //! with a few extra reads per tick, which localhost does not notice.
 
 use std::io::{ErrorKind, Read, Write};
-use std::net::{Shutdown, TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use crate::codec::{DecodeError, EncodeError, Message, check_length, decode, decode_frame_header, encode, max_frame_bytes, payload_rule};
@@ -354,6 +354,40 @@ pub fn accept(stream: TcpStream, timeout: Duration) -> Result<(Connection, Hello
     }
 
     Ok((Connection::framed(stream)?, hello))
+}
+
+/// The listening half: Master Control's socket, or a test playing Master Control's part.
+/// Binds 127.0.0.1 only while the trust stance holds — a world reachable from elsewhere is the
+/// trigger the deferred security tier waits behind — and accepts without blocking, so a tick
+/// loop can ask "did anybody knock?" and move on.
+#[derive(Debug)]
+pub struct Listener {
+    listener: TcpListener,
+}
+
+/// Bind the listening socket. Port 0 asks the operating system for any free port;
+/// [`Listener::port`] answers which.
+pub fn listen(port: u16) -> Result<Listener, TransportError> {
+    let listener = TcpListener::bind(("127.0.0.1", port))?;
+    listener.set_nonblocking(true)?;
+    Ok(Listener { listener })
+}
+
+impl Listener {
+    /// One pending connection if somebody knocked, `None` if nobody has. The stream is still
+    /// raw — hand it to [`accept`] to walk the handshake.
+    pub fn knock(&self) -> Result<Option<TcpStream>, TransportError> {
+        match self.listener.accept() {
+            Ok((stream, _)) => Ok(Some(stream)),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// The port actually bound — the answer to `listen(0)`, and the number a log should print.
+    pub fn port(&self) -> Result<u16, TransportError> {
+        Ok(self.listener.local_addr()?.port())
+    }
 }
 
 #[cfg(test)]
