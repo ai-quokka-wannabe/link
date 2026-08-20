@@ -22,6 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Actions lockdown, CodeQL default setup) were replicated through the API in the same sweep and
   verified byte-identical to the flagship's.
 
+- **The CMake face: a consumer never learns cargo exists.** `CMakeLists.txt` at the root is the
+  face Link shows a CMake consumer — `add_subdirectory()` it and receive exactly three things:
+  the header target `lnk`, the residence-rule function `lnk_copy_beside(<target>)` (an ALL
+  target per consumer rather than POST_BUILD, which only fires on relink and would leave a
+  fresh Link beside a stale executable), and the `LNK_LIBRARY_FILE`/`LNK_FINGERPRINT_FILE`
+  paths for tests. `project(Link LANGUAGES NONE)`, deliberately: consuming Link enables no
+  compiler in the consumer's build, and the owner's aim is exact — the flagship consumes the
+  wire as though it were just another shared library, oblivious to how it is made. Link's own
+  CI builds the face standalone on every push, so the claim is checked rather than remembered.
+
 - **Etape 4: the C ABI surface — the library a foreign runtime loads.**
   `include/lnk/lnk_client.h` declares it and `src/abi.rs` implements it: one exported symbol,
   `lnkGetClientVTable`, returning the table for its own version and NULL for any other — the

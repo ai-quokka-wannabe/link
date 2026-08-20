@@ -107,6 +107,15 @@ jobs:
             - name: Test
               run: cargo test
 
+            # The CMake face is how the flagship consumes this repository while staying oblivious
+            # to cargo; it must therefore keep building standalone, and this is where that claim
+            # is checked rather than remembered.
+            - name: The CMake face builds standalone (Linux)
+              if: runner.os == 'Linux'
+              run: |
+                cmake -S . -B build-cmake
+                cmake --build build-cmake
+
     # The flagship also runs sanitiser jobs and a software-Vulkan verification job. Neither
     # transfers: nothing here needs a device, and Rust's sanitisers require the nightly
     # toolchain, which this repository does not use.
