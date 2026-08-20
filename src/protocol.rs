@@ -20,7 +20,13 @@ compile_error!("The Link protocol is little-endian on the wire; a big-endian hos
 /// `LNK_PROTOCOL_VERSION`: bumped whenever any declaration changes meaning or layout. The
 /// handshake carries the header's fingerprint rather than this number; the number exists for
 /// the human-readable refusal.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
+
+/// `LNK_DEFAULT_PORT`: where Master Control listens when nobody names another port. A default
+/// and only a default. The number is the owner's: 30702, from JA-307020 — Tron's program
+/// designation — because the port is the doorway into the Grid and Tron is the security
+/// program who guards the system.
+pub const DEFAULT_PORT: u16 = 30_702;
 
 /// The first four bytes a client ever sends: `LNK1`. Anything else earns a refusal and a closed
 /// connection before any frame is read.
@@ -283,7 +289,20 @@ mod tests {
         assert_eq!(Role::Spectator as u8, 1);
         assert_eq!(Role::CreatureHost as u8, 2);
         assert_eq!(EventKind::Vocalisation as u8, 1);
-        assert_eq!(PROTOCOL_VERSION, 1);
+        assert_eq!(PROTOCOL_VERSION, 2);
+        assert_eq!(DEFAULT_PORT, 30_702);
+    }
+
+    /// The protocol header's own twin check: the two constants that must never drift between
+    /// the C side and this mirror, parsed out of the header this crate compiles in.
+    #[test]
+    fn the_protocol_header_and_this_mirror_agree_on_version_and_port() {
+        let header = include_str!("../include/lnk/lnk_protocol.h");
+        assert!(
+            header.contains(&format!("#define LNK_PROTOCOL_VERSION {PROTOCOL_VERSION}u")),
+            "LNK_PROTOCOL_VERSION drifted"
+        );
+        assert!(header.contains(&format!("#define LNK_DEFAULT_PORT {DEFAULT_PORT}u")), "LNK_DEFAULT_PORT drifted");
     }
 
     #[test]

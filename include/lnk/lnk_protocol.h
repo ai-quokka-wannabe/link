@@ -49,7 +49,14 @@ extern "C"
     carries the header's fingerprint rather than this number, so two ends disagreeing about the
     bytes are refused even when they agree about the number; the number exists for the
     human-readable refusal. */
-#define LNK_PROTOCOL_VERSION 1u
+#define LNK_PROTOCOL_VERSION 2u
+
+/*! The port Master Control listens on when nobody names another - a default and only a
+    default: the client's positional argument carries any host and port, and Master Control
+    takes its own listening choice the same way. The number is the owner's: 30702, from
+    JA-307020, Tron's program designation in the 1982 film - the port is the doorway into the
+    Grid, and Tron is the security program who guards the system. */
+#define LNK_DEFAULT_PORT 30702u
 
 /*
     Framing.

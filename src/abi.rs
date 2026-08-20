@@ -16,11 +16,11 @@ use std::time::Duration;
 
 use crate::codec::Message;
 use crate::protocol::{Actions, CreatureState, Derez, Event, Hello, MessageType, PROTOCOL_VERSION, Ping, Pong, Role, TickStateHeader, Welcome};
-use crate::transport::{Connection, TransportError, connect, local_hello, recorded_fingerprint};
+use crate::transport::{Connection, Listener, TransportError, connect, listen, local_hello, recorded_fingerprint};
 
 /// `LNK_CLIENT_ABI_VERSION`: bumped whenever the vtable or its rules change. The twin lives in
 /// `lnk_client.h`, and a test holds the two together.
-pub const LNK_CLIENT_ABI_VERSION: u32 = 1;
+pub const LNK_CLIENT_ABI_VERSION: u32 = 2;
 
 pub type LnkStatus = i32;
 
@@ -47,6 +47,16 @@ struct ClientInner {
     /// The rows the last TICK_STATE view borrows from. Replaced on the next TICK_STATE, freed
     /// on close — exactly the lifetime the header promises the C side.
     tick_rows: Vec<CreatureState>,
+}
+
+/// The opaque handle a listening Master Control (or a test playing one) holds.
+#[repr(C)]
+pub struct LnkServer {
+    _opaque: [u8; 0],
+}
+
+struct ServerInner {
+    listener: Listener,
 }
 
 /// `LnkTickStateView`: the header by value, the rows by borrow from [`ClientInner::tick_rows`].
@@ -103,6 +113,21 @@ pub struct LnkClientVTable {
     pub send_pong: extern "C" fn(client: *mut LnkClient, nonce: u64) -> LnkStatus,
     pub flush: extern "C" fn(client: *mut LnkClient, out_everything_left: *mut u8) -> LnkStatus,
     pub close: extern "C" fn(client: *mut LnkClient),
+    pub listen: extern "C" fn(port: u16, out_status: *mut LnkStatus, out_detail_utf8: *mut c_char, detail_capacity_bytes: u32) -> *mut LnkServer,
+    pub server_port: extern "C" fn(server: *mut LnkServer) -> u16,
+    pub accept: extern "C" fn(
+        server: *mut LnkServer,
+        timeout_milliseconds: u32,
+        out_hello: *mut Hello,
+        out_status: *mut LnkStatus,
+        out_detail_utf8: *mut c_char,
+        detail_capacity_bytes: u32,
+    ) -> *mut LnkClient,
+    pub send_welcome: extern "C" fn(connection: *mut LnkClient, welcome: *const Welcome) -> LnkStatus,
+    pub send_tick_state: extern "C" fn(connection: *mut LnkClient, header: *const TickStateHeader, states: *const CreatureState) -> LnkStatus,
+    pub send_event: extern "C" fn(connection: *mut LnkClient, event: *const Event) -> LnkStatus,
+    pub send_derez: extern "C" fn(connection: *mut LnkClient, derez: *const Derez) -> LnkStatus,
+    pub close_server: extern "C" fn(server: *mut LnkServer),
 }
 
 static VTABLE: LnkClientVTable = LnkClientVTable {
@@ -117,6 +142,14 @@ static VTABLE: LnkClientVTable = LnkClientVTable {
     send_pong: send_pong_impl,
     flush: flush_impl,
     close: close_impl,
+    listen: listen_impl,
+    server_port: server_port_impl,
+    accept: accept_impl,
+    send_welcome: send_welcome_impl,
+    send_tick_state: send_tick_state_impl,
+    send_event: send_event_impl,
+    send_derez: send_derez_impl,
+    close_server: close_server_impl,
 };
 
 /// The library's one exported symbol. Kept camel-case to match the header and the flagship's
@@ -361,6 +394,181 @@ extern "C" fn flush_impl(client: *mut LnkClient, out_everything_left: *mut u8) -
     })
 }
 
+extern "C" fn listen_impl(port: u16, out_status: *mut LnkStatus, out_detail_utf8: *mut c_char, detail_capacity_bytes: u32) -> *mut LnkServer {
+    guarded(std::ptr::null_mut(), || {
+        if out_status.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: out_status was just checked non-null and belongs to the caller. Pre-set the
+        // panic verdict so an unwind caught by the guard leaves the truth behind.
+        unsafe { *out_status = LNK_PANIC };
+
+        match listen(port) {
+            Ok(listener) => {
+                // SAFETY: as above.
+                unsafe { *out_status = LNK_OK };
+                Box::into_raw(Box::new(ServerInner { listener })).cast::<LnkServer>()
+            }
+            Err(error) => {
+                // SAFETY: as above.
+                unsafe { *out_status = status_of(&error) };
+                write_detail(out_detail_utf8, detail_capacity_bytes, &detail_of(&error));
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// The one place a server pointer becomes a Rust borrow again.
+///
+/// # Safety
+///
+/// `server` must be a pointer returned by [`listen_impl`] and not yet passed to
+/// [`close_server_impl`] — the contract the header states.
+unsafe fn server_of<'a>(server: *mut LnkServer) -> &'a mut ServerInner {
+    // SAFETY: delegated to the caller, per the function's contract above.
+    unsafe { &mut *server.cast::<ServerInner>() }
+}
+
+extern "C" fn server_port_impl(server: *mut LnkServer) -> u16 {
+    guarded(0, || {
+        if server.is_null() {
+            return 0;
+        }
+        // SAFETY: non-null was just checked; validity is the header's stated contract.
+        let inner = unsafe { server_of(server) };
+        inner.listener.port().unwrap_or(0)
+    })
+}
+
+extern "C" fn accept_impl(
+    server: *mut LnkServer,
+    timeout_milliseconds: u32,
+    out_hello: *mut Hello,
+    out_status: *mut LnkStatus,
+    out_detail_utf8: *mut c_char,
+    detail_capacity_bytes: u32,
+) -> *mut LnkClient {
+    guarded(std::ptr::null_mut(), || {
+        if out_status.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: out_status was just checked non-null; pre-set the panic verdict.
+        unsafe { *out_status = LNK_PANIC };
+
+        let refuse = |status: LnkStatus, detail: &str| -> *mut LnkClient {
+            // SAFETY: as above.
+            unsafe { *out_status = status };
+            write_detail(out_detail_utf8, detail_capacity_bytes, detail);
+            std::ptr::null_mut()
+        };
+
+        if server.is_null() || out_hello.is_null() {
+            return refuse(LNK_BAD_ARGUMENT, "link: a null pointer is not an argument");
+        }
+        // SAFETY: non-null was just checked; validity is the header's stated contract.
+        let inner = unsafe { server_of(server) };
+
+        let stream = match inner.listener.knock() {
+            Ok(None) => {
+                // SAFETY: as above.
+                unsafe { *out_status = LNK_NOTHING_YET };
+                return std::ptr::null_mut();
+            }
+            Ok(Some(stream)) => stream,
+            Err(error) => return refuse(status_of(&error), &detail_of(&error)),
+        };
+
+        match crate::transport::accept(stream, Duration::from_millis(u64::from(timeout_milliseconds))) {
+            Ok((connection, hello)) => {
+                // SAFETY: out_hello was checked non-null; Hello is plain old data.
+                unsafe {
+                    *out_hello = hello;
+                    *out_status = LNK_OK;
+                }
+                Box::into_raw(Box::new(ClientInner {
+                    connection,
+                    tick_rows: Vec::new(),
+                }))
+                .cast::<LnkClient>()
+            }
+            Err(error) => refuse(status_of(&error), &detail_of(&error)),
+        }
+    })
+}
+
+extern "C" fn send_welcome_impl(connection: *mut LnkClient, welcome: *const Welcome) -> LnkStatus {
+    guarded(LNK_PANIC, || {
+        if welcome.is_null() {
+            return LNK_BAD_ARGUMENT;
+        }
+        // SAFETY: non-null was just checked; Welcome is plain old data, read by copy.
+        let welcome = unsafe { *welcome };
+        queue_on(connection, &Message::Welcome(welcome))
+    })
+}
+
+extern "C" fn send_tick_state_impl(connection: *mut LnkClient, header: *const TickStateHeader, states: *const CreatureState) -> LnkStatus {
+    guarded(LNK_PANIC, || {
+        if header.is_null() {
+            return LNK_BAD_ARGUMENT;
+        }
+        // SAFETY: non-null was just checked; TickStateHeader is plain old data, read by copy.
+        let header = unsafe { *header };
+
+        // The count is judged before a single row is read, so a lying count cannot make this
+        // library read past the caller's array — the wire's validate-before-copy rule, applied
+        // to our own caller with exactly the trust a stranger would get.
+        if header.creature_count > crate::protocol::TICK_STATE_MAX_CREATURES {
+            return LNK_BAD_ARGUMENT;
+        }
+        if header.creature_count > 0 && states.is_null() {
+            return LNK_BAD_ARGUMENT;
+        }
+        let rows = if header.creature_count == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: states is non-null and the caller promised creature_count rows; the count
+            // was capped above, so at most TICK_STATE_MAX_CREATURES rows are read.
+            unsafe { std::slice::from_raw_parts(states, header.creature_count as usize) }.to_vec()
+        };
+        queue_on(connection, &Message::TickState { header, states: rows })
+    })
+}
+
+extern "C" fn send_event_impl(connection: *mut LnkClient, event: *const Event) -> LnkStatus {
+    guarded(LNK_PANIC, || {
+        if event.is_null() {
+            return LNK_BAD_ARGUMENT;
+        }
+        // SAFETY: non-null was just checked; Event is plain old data, read by copy.
+        let event = unsafe { *event };
+        queue_on(connection, &Message::Event(event))
+    })
+}
+
+extern "C" fn send_derez_impl(connection: *mut LnkClient, derez: *const Derez) -> LnkStatus {
+    guarded(LNK_PANIC, || {
+        if derez.is_null() {
+            return LNK_BAD_ARGUMENT;
+        }
+        // SAFETY: non-null was just checked; Derez is plain old data, read by copy.
+        let derez = unsafe { *derez };
+        queue_on(connection, &Message::Derez(derez))
+    })
+}
+
+extern "C" fn close_server_impl(server: *mut LnkServer) {
+    guarded((), || {
+        if server.is_null() {
+            return;
+        }
+        // SAFETY: the header's contract — a pointer from listen, not yet closed — and from here
+        // the box owns it again, so it is freed exactly once.
+        drop(unsafe { Box::from_raw(server.cast::<ServerInner>()) });
+    });
+}
+
 extern "C" fn close_impl(client: *mut LnkClient) {
     guarded((), || {
         if client.is_null() {
@@ -377,7 +585,7 @@ extern "C" fn close_impl(client: *mut LnkClient) {
 mod tests {
     use super::*;
     use crate::codec::Message;
-    use crate::protocol::TickStateHeader;
+    use crate::protocol::{EventKind, TICK_STATE_MAX_CREATURES, TickStateHeader};
     use crate::transport::accept;
     use std::ffi::CString;
     use std::net::TcpListener;
@@ -606,6 +814,194 @@ mod tests {
         let words = unsafe { CStr::from_ptr(detail.as_ptr().cast::<c_char>()) }.to_string_lossy().to_string();
         assert!(words.contains("no vacancy"), "the refusal must arrive verbatim, got: {words}");
         server.join().expect("server thread");
+    }
+
+    #[test]
+    fn version_one_is_history() {
+        assert!(lnkGetClientVTable(1).is_null(), "ABI 1 must be refused now that 2 exists");
+    }
+
+    #[test]
+    fn the_server_half_carries_a_whole_world_tick() {
+        let table = vtable();
+        let mut status: LnkStatus = -1;
+        let server = (table.listen)(0, &raw mut status, std::ptr::null_mut(), 0);
+        assert_eq!(status, LNK_OK);
+        assert!(!server.is_null());
+        let port = (table.server_port)(server);
+        assert_ne!(port, 0, "listen(0) answers with the port the operating system granted");
+
+        // Nobody has knocked yet: the server's loop hears nothing and moves on.
+        let mut hello = unsafe { std::mem::zeroed::<Hello>() };
+        let knock = (table.accept)(server, 1_000, &raw mut hello, &raw mut status, std::ptr::null_mut(), 0);
+        assert!(knock.is_null());
+        assert_eq!(status, LNK_NOTHING_YET);
+
+        let client_thread = std::thread::spawn(move || {
+            let table = vtable();
+            let address = CString::new(format!("127.0.0.1:{port}")).expect("address");
+            let mut welcome = unsafe { std::mem::zeroed::<Welcome>() };
+            let mut status: LnkStatus = -1;
+            let client = (table.connect)(
+                address.as_ptr(),
+                Role::Spectator as u8,
+                5_000,
+                &raw mut welcome,
+                &raw mut status,
+                std::ptr::null_mut(),
+                0,
+            );
+            assert_eq!(status, LNK_OK);
+            assert!(!client.is_null());
+            assert_eq!(welcome.current_tick, 900);
+            assert_eq!(welcome.client_id, 4);
+
+            let mut view = unsafe { std::mem::zeroed::<MessageView>() };
+            let mut seen = Vec::new();
+            let deadline = std::time::Instant::now() + PATIENCE;
+            while seen.len() < 3 {
+                match (table.poll)(client, &raw mut view) {
+                    LNK_NOTHING_YET => {
+                        assert!(std::time::Instant::now() < deadline, "the world tick never arrived");
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    LNK_OK => {
+                        seen.push(view.message_type);
+                        if seen.len() == 1 {
+                            assert_eq!(view.message_type, MessageType::TickState as u8);
+                            // SAFETY: the type byte names the union member; the rows stay valid
+                            // until the next poll, per the header's contract.
+                            let tick_state = unsafe { view.payload.tick_state };
+                            assert_eq!(tick_state.header.tick, 900);
+                            assert_eq!(tick_state.header.creature_count, 2);
+                            assert_eq!(unsafe { (*tick_state.states.add(1)).creature_id }, 7);
+                        }
+                    }
+                    other => panic!("poll answered {other}"),
+                }
+            }
+            let expected = vec![MessageType::TickState as u8, MessageType::Event as u8, MessageType::Derez as u8];
+            assert_eq!(seen, expected, "one coalesced write, three frames, in order");
+            (table.close)(client);
+        });
+
+        let deadline = std::time::Instant::now() + PATIENCE;
+        let connection = loop {
+            let connection = (table.accept)(server, 5_000, &raw mut hello, &raw mut status, std::ptr::null_mut(), 0);
+            if !connection.is_null() {
+                break connection;
+            }
+            assert_eq!(status, LNK_NOTHING_YET, "an arriving knock must not fail");
+            assert!(std::time::Instant::now() < deadline, "the knock never arrived");
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(status, LNK_OK);
+        assert_eq!(hello.role, Role::Spectator as u8);
+        assert_eq!(hello.protocol_version, PROTOCOL_VERSION);
+
+        let welcome = Welcome {
+            current_tick: 900,
+            nominal_dt_seconds: 0.031_25,
+            client_id: 4,
+        };
+        assert_eq!((table.send_welcome)(connection, &raw const welcome), LNK_OK);
+        let rows = [
+            CreatureState {
+                creature_id: 3,
+                position: [0.0, 1.0, 2.0],
+                yaw: 0.0,
+                velocity: [0.0; 3],
+                yaw_rate: 0.0,
+                vocalisation: 0.0,
+            },
+            CreatureState {
+                creature_id: 7,
+                position: [5.0, 1.0, 2.0],
+                yaw: 0.5,
+                velocity: [1.0, 0.0, 0.0],
+                yaw_rate: 0.1,
+                vocalisation: 0.9,
+            },
+        ];
+        let header = TickStateHeader {
+            tick: 900,
+            creature_count: 2,
+            reserved0: [0; 4],
+        };
+        assert_eq!((table.send_tick_state)(connection, &raw const header, rows.as_ptr()), LNK_OK);
+        let event = Event {
+            tick: 900,
+            position: [5.0, 1.0, 2.0],
+            strength: 0.9,
+            creature_id: 7,
+            kind: EventKind::Vocalisation as u8,
+            reserved0: [0; 3],
+        };
+        assert_eq!((table.send_event)(connection, &raw const event), LNK_OK);
+        let derez = Derez {
+            tick: 901,
+            creature_id: 3,
+            reserved0: [0; 4],
+        };
+        assert_eq!((table.send_derez)(connection, &raw const derez), LNK_OK);
+        let mut everything_left = 0u8;
+        assert_eq!((table.flush)(connection, &raw mut everything_left), LNK_OK);
+        assert_eq!(everything_left, 1);
+
+        client_thread.join().expect("client thread");
+        (table.close)(connection);
+        (table.close_server)(server);
+    }
+
+    #[test]
+    fn a_lying_tick_state_count_is_refused_before_a_single_row_is_read() {
+        let table = vtable();
+        let one_row = [CreatureState {
+            creature_id: 0,
+            position: [0.0; 3],
+            yaw: 0.0,
+            velocity: [0.0; 3],
+            yaw_rate: 0.0,
+            vocalisation: 0.0,
+        }];
+        let over_cap = TickStateHeader {
+            tick: 1,
+            creature_count: TICK_STATE_MAX_CREATURES + 1,
+            reserved0: [0; 4],
+        };
+        assert_eq!(
+            (table.send_tick_state)(std::ptr::null_mut(), &raw const over_cap, one_row.as_ptr()),
+            LNK_BAD_ARGUMENT,
+            "a count over the cap is refused before rows or connection are even looked at"
+        );
+        let one_claimed = TickStateHeader {
+            tick: 1,
+            creature_count: 1,
+            reserved0: [0; 4],
+        };
+        assert_eq!(
+            (table.send_tick_state)(std::ptr::null_mut(), &raw const one_claimed, std::ptr::null()),
+            LNK_BAD_ARGUMENT,
+            "a count with no rows behind it is refused before any read"
+        );
+    }
+
+    #[test]
+    fn the_server_half_refuses_nulls_too() {
+        let table = vtable();
+        assert!(
+            (table.listen)(0, std::ptr::null_mut(), std::ptr::null_mut(), 0).is_null(),
+            "no status pointer, no server"
+        );
+        assert_eq!((table.server_port)(std::ptr::null_mut()), 0);
+        let mut hello = unsafe { std::mem::zeroed::<Hello>() };
+        let mut status: LnkStatus = -1;
+        assert!((table.accept)(std::ptr::null_mut(), 0, &raw mut hello, &raw mut status, std::ptr::null_mut(), 0).is_null());
+        assert_eq!(status, LNK_BAD_ARGUMENT);
+        assert_eq!((table.send_welcome)(std::ptr::null_mut(), std::ptr::null()), LNK_BAD_ARGUMENT);
+        assert_eq!((table.send_event)(std::ptr::null_mut(), std::ptr::null()), LNK_BAD_ARGUMENT);
+        assert_eq!((table.send_derez)(std::ptr::null_mut(), std::ptr::null()), LNK_BAD_ARGUMENT);
+        (table.close_server)(std::ptr::null_mut());
     }
 
     /// The cross-language twin check without a C compiler: the header's #define lines are
