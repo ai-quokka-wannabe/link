@@ -49,7 +49,7 @@ extern "C"
     carries the header's fingerprint rather than this number, so two ends disagreeing about the
     bytes are refused even when they agree about the number; the number exists for the
     human-readable refusal. */
-#define LNK_PROTOCOL_VERSION 2u
+#define LNK_PROTOCOL_VERSION 3u
 
 /*! The port Master Control listens on when nobody names another - a default and only a
     default: the client's positional argument carries any host and port, and Master Control
@@ -57,6 +57,16 @@ extern "C"
     JA-307020, Tron's program designation in the 1982 film - the port is the doorway into the
     Grid, and Tron is the security program who guards the system. */
 #define LNK_DEFAULT_PORT 30702u
+
+/*! Keepalive is a contract with numbers, published here exactly as the port is, because a
+    timeout only works when both ends compile in the same one. An end that has heard nothing for
+    LNK_KEEPALIVE_PING_MILLIS sends a PING; an end that has heard nothing for
+    LNK_KEEPALIVE_DEAD_MILLIS declares the peer dead and closes the connection - LAN-sane
+    figures inside the shipped norms (Gaffer's 5 s, Source's 30 s, Minecraft's 20-30 s). The
+    library carries the constants and the obligation; the caller owns the clock, because a
+    protocol library that owns timers is a protocol library that owns threads. */
+#define LNK_KEEPALIVE_PING_MILLIS 1000u
+#define LNK_KEEPALIVE_DEAD_MILLIS 10000u
 
 /*
     Framing.
@@ -116,8 +126,12 @@ extern "C"
 #define LNK_MSG_PONG 9u
 #define LNK_MSG_BYE 10u
 
-/*! What a client is, stated in HELLO. Zero is invalid. A spectator never sends ACTIONS and a
-    server refuses ACTIONS from one - SourceTV's observers-fall-out-for-free, as a rule. */
+/*! What a client is, stated in HELLO. Zero is invalid. A spectator never sends ACTIONS, and the
+    refusal is enforced inside this library on both ends - the sending half refuses to stage
+    ACTIONS on a spectator connection, and the server half treats an ACTIONS frame arriving on
+    one as a protocol violation and closes it. SourceTV's observers-fall-out-for-free, and the
+    CS:GO coaching bug's lesson that spectator privilege is enforced where the authority lives,
+    both as one mechanism that cannot drift because there is only one implementation. */
 #define LNK_ROLE_SPECTATOR 1u
 #define LNK_ROLE_CREATURE_HOST 2u
 
@@ -170,17 +184,42 @@ typedef struct LnkTickStateHeader {
     ceiling, so the cap can quadruple before the framing is even interesting. */
 #define LNK_TICK_STATE_MAX_CREATURES 256u
 
-/*! ACTIONS, creature host to server: the Program's staged intent for a future tick, exactly the
-    twelve bytes of TglActions plus the address. The server executes the latest ACTIONS with
-    tick <= the tick being stepped and discards stragglers; a creature with no ACTIONS coasts,
-    which is the ABI's own sentence and the packet-loss policy in one. */
+/*! ACTIONS, creature host to server: the Program's staged intent for a future tick - the twelve
+    bytes of TglActions plus the address, and the PREVIOUS tick's twelve piggybacked beside them,
+    so one lost or late message loses nothing (Tribes repeated its moves across datagrams for
+    exactly this reason; redundant on TCP, load-bearing the day the UDP trigger fires).
+
+    The server accepts through a window, [N, N+1) against the tick N being stepped: within it the
+    latest intent per creature per tick wins, deduplicated by (creature_id, tick) so the
+    piggybacked copy is free to process; a stale intent loses to a newer one, and an intent
+    tagged for a far future tick is refused outright rather than queued.
+
+    Silence has authors, and the rules differ because the information differs (TOPOLOGY.md
+    carries the ruling in full). A silent Program said "zero": its host sends the zeroes and the
+    creature brakes, the ABI's own sentence. A silent network said nothing: the server re-applies
+    the last accepted intent for up to LNK_ACTIONS_REPEAT_TICKS, then falls to zeroed coast,
+    because the world must not fabricate a brake the Program never asked for. A dead host - see
+    the keepalive constants - drops its creature to the zeroed neutral reflex, still embodied:
+    the world never waits. */
 typedef struct LnkActions {
     uint64_t tick;                 /*!< The tick this intent is staged for. */
     uint32_t creature_id;
     float desired_forward_speed;   /*!< Metres per second, clamped server-side to the body. */
     float desired_turn_rate;       /*!< Radians per second, clamped server-side to the body. */
     float vocalisation_strength;   /*!< 0 to 1, clamped server-side. */
+    float previous_forward_speed;  /*!< The tick-1 intent, resent whole. Zeroes when none exists. */
+    float previous_turn_rate;      /*!< See previous_forward_speed. */
+    float previous_vocalisation;   /*!< See previous_forward_speed. */
+    uint8_t reserved0[4];          /*!< Always zero. Named so the asserts can count it - the
+                                        alternative is four bytes of invisible alignment padding,
+                                        and invisible padding is exactly what this header refuses. */
 } LnkActions;
+
+/*! Ticks the server re-applies a connected host's last accepted intent when its ACTIONS are
+    merely missing, before falling to zeroed coast. One: the Overwatch answer - repeat the last
+    input, never stall the world, never rewind - bounded so a longer stall becomes honest
+    coasting rather than a runaway. */
+#define LNK_ACTIONS_REPEAT_TICKS 1u
 
 /*! EVENT, server to every client: a tick-stamped notification, never load-bearing state. The
     spectator synthesises its audio from these; a creature host ignores them today. */
@@ -253,6 +292,8 @@ LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkTickStateHeader, tick) + LNK_MEMBER_BYTES(
                   "LnkTickStateHeader has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkActions, tick) + LNK_MEMBER_BYTES(LnkActions, creature_id) + LNK_MEMBER_BYTES(LnkActions, desired_forward_speed)
                           + LNK_MEMBER_BYTES(LnkActions, desired_turn_rate) + LNK_MEMBER_BYTES(LnkActions, vocalisation_strength)
+                          + LNK_MEMBER_BYTES(LnkActions, previous_forward_speed) + LNK_MEMBER_BYTES(LnkActions, previous_turn_rate)
+                          + LNK_MEMBER_BYTES(LnkActions, previous_vocalisation) + LNK_MEMBER_BYTES(LnkActions, reserved0)
                       == sizeof(LnkActions),
                   "LnkActions has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkEvent, tick) + LNK_MEMBER_BYTES(LnkEvent, position) + LNK_MEMBER_BYTES(LnkEvent, strength)
@@ -268,7 +309,8 @@ LNK_STATIC_ASSERT(sizeof(LnkHello) == 40u, "LnkHello must be 40 bytes: version, 
 LNK_STATIC_ASSERT(sizeof(LnkWelcome) == 16u, "LnkWelcome must be 16 bytes: tick, dt, client id.");
 LNK_STATIC_ASSERT(sizeof(LnkCreatureState) == 40u, "LnkCreatureState must be 40 bytes: id, pose, velocity, voice.");
 LNK_STATIC_ASSERT(sizeof(LnkTickStateHeader) == 16u, "LnkTickStateHeader must be 16 bytes: tick, count, reserved.");
-LNK_STATIC_ASSERT(sizeof(LnkActions) == 24u, "LnkActions must be 24 bytes: tick, id, and TglActions' twelve.");
+LNK_STATIC_ASSERT(sizeof(LnkActions) == 40u,
+                  "LnkActions must be 40 bytes: tick, id, TglActions' twelve, the previous tick's twelve resent, and a counted reserved word.");
 LNK_STATIC_ASSERT(sizeof(LnkEvent) == 32u, "LnkEvent must be 32 bytes: tick, place, strength, cause, kind.");
 LNK_STATIC_ASSERT(sizeof(LnkDerez) == 16u, "LnkDerez must be 16 bytes: tick, id, reserved.");
 LNK_STATIC_ASSERT(sizeof(LnkPing) == 8u && sizeof(LnkPong) == 8u, "LnkPing and LnkPong must be 8 bytes: the nonce.");

@@ -40,7 +40,20 @@ pub enum TransportError {
     /// The handshake's timeout elapsed. Windows reports this as `TimedOut` and Unix as
     /// `WouldBlock`; both normalise here so callers match one thing.
     HandshakeTimedOut,
+    /// An ACTIONS frame arrived on a spectator-role connection: a protocol violation the
+    /// library enforces itself, on the server end, so the rule cannot drift between consumers.
+    /// The connection is shut before this is returned.
+    ActionsFromSpectator,
+    /// The outgoing buffer passed [`WRITE_BUFFER_LIMIT_BYTES`] — the peer is not reading, and
+    /// an unbounded buffer would be an allocation the peer controls. The connection is over.
+    WriteBufferOverflow,
 }
+
+/// The most bytes the outgoing buffer may hold before the connection is declared dead rather
+/// than the buffer grown: a megabyte is hundreds of full-world ticks, so a peer this far behind
+/// is not merely slow. The keepalive constants usually reap such a peer first; this is the
+/// backstop that bounds memory even when they have not yet.
+pub const WRITE_BUFFER_LIMIT_BYTES: usize = 1_048_576;
 
 impl From<std::io::Error> for TransportError {
     fn from(error: std::io::Error) -> Self {
@@ -160,6 +173,9 @@ impl WriteBuffer {
     /// Push pending bytes into `sink`. `Ok(true)` means everything left; `Ok(false)` means the
     /// socket stopped accepting and the remainder is carried for the next flush.
     fn flush_into(&mut self, sink: &mut impl Write) -> Result<bool, TransportError> {
+        if self.pending.len() > WRITE_BUFFER_LIMIT_BYTES {
+            return Err(TransportError::WriteBufferOverflow);
+        }
         while self.written < self.pending.len() {
             match sink.write(&self.pending[self.written..]) {
                 Ok(0) => return Err(TransportError::PeerClosed),
@@ -181,10 +197,16 @@ pub struct Connection {
     stream: TcpStream,
     reader: FrameReader,
     writer: WriteBuffer,
+    /// True on a server-held connection whose peer said spectator in HELLO: an ACTIONS frame
+    /// arriving here is the role violation [`TransportError::ActionsFromSpectator`] names.
+    forbid_incoming_actions: bool,
+    /// True on a client-held connection that introduced itself as a spectator: the sending
+    /// half's mirror of the same rule, enforced at the ABI's `send_actions`.
+    forbid_outgoing_actions: bool,
 }
 
 impl Connection {
-    fn framed(stream: TcpStream) -> Result<Self, TransportError> {
+    fn framed(stream: TcpStream, forbid_incoming_actions: bool, forbid_outgoing_actions: bool) -> Result<Self, TransportError> {
         stream.set_read_timeout(None)?;
         stream.set_write_timeout(None)?;
         stream.set_nonblocking(true)?;
@@ -192,16 +214,32 @@ impl Connection {
             stream,
             reader: FrameReader::new(),
             writer: WriteBuffer::new(),
+            forbid_incoming_actions,
+            forbid_outgoing_actions,
         })
     }
 
+    /// False exactly when this end introduced itself as a spectator: a spectator never sends
+    /// ACTIONS, and the sending half refuses to stage them.
+    #[must_use]
+    pub fn may_send_actions(&self) -> bool {
+        !self.forbid_outgoing_actions
+    }
+
     /// One complete message if the socket holds one, `None` if it does not yet. Any refusal —
-    /// unknown type, impossible length, a payload the codec rejects — is the connection's end:
-    /// hang up and report, exactly as the doctrine demands.
+    /// unknown type, impossible length, a payload the codec rejects, ACTIONS from a spectator —
+    /// is the connection's end: hang up and report, exactly as the doctrine demands.
     pub fn poll(&mut self) -> Result<Option<Message>, TransportError> {
         match self.reader.pump(&mut self.stream)? {
             None => Ok(None),
-            Some((type_byte, payload)) => decode(type_byte, &payload).map(Some).map_err(TransportError::Frame),
+            Some((type_byte, payload)) => {
+                let message = decode(type_byte, &payload).map_err(TransportError::Frame)?;
+                if matches!(message, Message::Actions(_)) && self.forbid_incoming_actions {
+                    let _ = self.stream.shutdown(Shutdown::Both);
+                    return Err(TransportError::ActionsFromSpectator);
+                }
+                Ok(Some(message))
+            }
         }
     }
 
@@ -297,7 +335,7 @@ pub fn connect<A: ToSocketAddrs>(address: A, hello: &Hello, timeout: Duration) -
         return Err(TransportError::Garbled("a WELCOME frame that decoded as something else"));
     };
 
-    Ok((Connection::framed(stream)?, welcome))
+    Ok((Connection::framed(stream, false, hello.role == Role::Spectator as u8)?, welcome))
 }
 
 fn read_answer(stream: &mut TcpStream, header: &mut [u8; FRAME_HEADER_BYTES]) -> Result<(), TransportError> {
@@ -344,16 +382,24 @@ pub fn accept(stream: TcpStream, timeout: Duration) -> Result<(Connection, Hello
     };
 
     if hello.fingerprint != recorded_fingerprint() {
-        return Err(refuse(
-            &stream,
+        // Two builds can agree about the version number and still disagree about the bytes -
+        // a modified header without a bump. Naming two equal numbers at each other would be
+        // technically true and perfectly unhelpful, so that case gets its own words.
+        let reason = if hello.protocol_version == PROTOCOL_VERSION {
+            format!(
+                "link: protocol fingerprint mismatch at the same version {}: one of us carries a modified lnk_protocol.h - rebuild both ends from the same header\n",
+                PROTOCOL_VERSION
+            )
+        } else {
             format!(
                 "link: protocol fingerprint mismatch: you speak protocol version {}, this end speaks version {} - rebuild against this end's lnk_protocol.h\n",
                 hello.protocol_version, PROTOCOL_VERSION
-            ),
-        ));
+            )
+        };
+        return Err(refuse(&stream, reason));
     }
 
-    Ok((Connection::framed(stream)?, hello))
+    Ok((Connection::framed(stream, hello.role == Role::Spectator as u8, false)?, hello))
 }
 
 /// The listening half: Master Control's socket, or a test playing Master Control's part.
@@ -419,6 +465,10 @@ mod tests {
             desired_forward_speed: 1.0,
             desired_turn_rate: 0.0,
             vocalisation_strength: 0.0,
+            previous_forward_speed: 0.0,
+            previous_turn_rate: 0.0,
+            previous_vocalisation: 0.0,
+            reserved0: [0; 4],
         })
     }
 
@@ -500,7 +550,100 @@ mod tests {
 
         let reason = client.join().expect("client thread");
         assert!(reason.contains("fingerprint mismatch"), "got: {reason}");
-        assert!(reason.contains(&format!("version {PROTOCOL_VERSION}")), "the refusal names versions, got: {reason}");
+        assert!(
+            reason.contains(&format!("same version {PROTOCOL_VERSION}")) && reason.contains("modified"),
+            "equal versions with differing bytes must be named as a modified header, not two equal numbers - got: {reason}"
+        );
+    }
+
+    #[test]
+    fn a_wrong_fingerprint_from_another_version_names_both_versions() {
+        let (listener, address) = loopback();
+
+        let client = std::thread::spawn(move || {
+            let mut wrong = local_hello(Role::Spectator);
+            wrong.fingerprint[0] ^= 0xFF;
+            wrong.protocol_version = PROTOCOL_VERSION + 1;
+            let error = connect(address, &wrong, PATIENCE).expect_err("a wrong fingerprint must not connect");
+            let TransportError::Refused { reason } = error else {
+                panic!("expected a worded refusal, got {error:?}");
+            };
+            reason
+        });
+
+        let (stream, _) = listener.accept().expect("accept");
+        assert!(matches!(accept(stream, PATIENCE), Err(TransportError::Refused { .. })));
+
+        let reason = client.join().expect("client thread");
+        assert!(
+            reason.contains(&format!("version {}", PROTOCOL_VERSION + 1)) && reason.contains(&format!("version {PROTOCOL_VERSION}")),
+            "differing versions must both be named, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn actions_from_a_spectator_end_the_connection_at_the_server() {
+        let (listener, address) = loopback();
+
+        // A hostile client: introduces itself as a spectator, then queues ACTIONS at the
+        // transport layer, beneath the ABI's own sending-half refusal.
+        let client = std::thread::spawn(move || {
+            let (mut connection, _) = connect(address, &local_hello(Role::Spectator), PATIENCE).expect("handshake");
+            connection.queue(&actions(9)).expect("the codec itself does not know roles");
+            // The server may hang up on the violation while this end is still flushing; that
+            // is the refusal working, not a test failure.
+            loop {
+                match connection.flush() {
+                    Ok(true) | Err(_) => break,
+                    Ok(false) => {}
+                }
+            }
+            connection
+        });
+
+        let (stream, _) = listener.accept().expect("accept");
+        let (mut server_side, hello) = accept(stream, PATIENCE).expect("handshake");
+        assert_eq!(hello.role, Role::Spectator as u8);
+
+        // The client's connect blocks on WELCOME; the violation only flows once it is a citizen.
+        server_side
+            .queue(&Message::Welcome(Welcome {
+                current_tick: 1,
+                nominal_dt_seconds: 0.031_25,
+                client_id: 1,
+            }))
+            .expect("queue welcome");
+        while !server_side.flush().expect("flush welcome") {}
+
+        let deadline = std::time::Instant::now() + PATIENCE;
+        let verdict = loop {
+            match server_side.poll() {
+                Ok(None) => {
+                    assert!(std::time::Instant::now() < deadline, "the violation never arrived");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                other => break other,
+            }
+        };
+        assert!(
+            matches!(verdict, Err(TransportError::ActionsFromSpectator)),
+            "a spectator's ACTIONS must end the connection, got {verdict:?}"
+        );
+        drop(client.join().expect("client thread"));
+    }
+
+    #[test]
+    fn an_unread_peer_cannot_grow_the_write_buffer_without_bound() {
+        let mut writer = WriteBuffer {
+            pending: vec![0u8; WRITE_BUFFER_LIMIT_BYTES + 1],
+            written: 0,
+        };
+        let mut sink = Vec::new();
+        assert!(
+            matches!(writer.flush_into(&mut sink), Err(TransportError::WriteBufferOverflow)),
+            "a megabyte of unread pending bytes is a dead peer, not a bigger buffer"
+        );
+        assert!(sink.is_empty(), "an overflowing buffer must not keep writing");
     }
 
     #[test]
@@ -508,7 +651,9 @@ mod tests {
         let (listener, address) = loopback();
 
         let client = std::thread::spawn(move || {
-            let (connection, _) = connect(address, &local_hello(Role::Spectator), PATIENCE).expect("handshake");
+            // A creature host, because the dribbled frame is ACTIONS and a spectator's would
+            // now be refused as the role violation it is.
+            let (connection, _) = connect(address, &local_hello(Role::CreatureHost), PATIENCE).expect("handshake");
             let mut frame = Vec::new();
             encode(&actions(7), &mut frame).expect("encode");
             let mut raw = connection.stream;

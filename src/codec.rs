@@ -59,7 +59,14 @@ pub enum DecodeError {
 /// minus the errors only raw bytes can have.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EncodeError {
-    CountOverCap { count: usize },
+    CountOverCap {
+        count: usize,
+    },
+    /// A TICK_STATE header whose declared count disagrees with the rows actually supplied.
+    CountRowsMismatch {
+        count: u32,
+        rows: usize,
+    },
     InvalidRole(u8),
     InvalidEventKind(u8),
     ReservedNotZero,
@@ -150,13 +157,22 @@ pub fn decode(type_byte: u8, payload: &[u8]) -> Result<Message, DecodeError> {
                 nominal_dt_seconds: read_f32(payload, 8),
                 client_id: read_u32(payload, 12),
             })),
-            t if t == MessageType::Actions as u8 => Ok(Message::Actions(Actions {
-                tick: read_u64(payload, 0),
-                creature_id: read_u32(payload, 8),
-                desired_forward_speed: read_f32(payload, 12),
-                desired_turn_rate: read_f32(payload, 16),
-                vocalisation_strength: read_f32(payload, 20),
-            })),
+            t if t == MessageType::Actions as u8 => {
+                if payload[36..40] != [0; 4] {
+                    return Err(DecodeError::ReservedNotZero);
+                }
+                Ok(Message::Actions(Actions {
+                    tick: read_u64(payload, 0),
+                    creature_id: read_u32(payload, 8),
+                    desired_forward_speed: read_f32(payload, 12),
+                    desired_turn_rate: read_f32(payload, 16),
+                    vocalisation_strength: read_f32(payload, 20),
+                    previous_forward_speed: read_f32(payload, 24),
+                    previous_turn_rate: read_f32(payload, 28),
+                    previous_vocalisation: read_f32(payload, 32),
+                    reserved0: [0; 4],
+                }))
+            }
             t if t == MessageType::Event as u8 => decode_event(payload),
             t if t == MessageType::Derez as u8 => {
                 if payload[12..16] != [0u8; 4] {
@@ -271,16 +287,16 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             if states.len() > TICK_STATE_MAX_CREATURES as usize {
                 return Err(EncodeError::CountOverCap { count: states.len() });
             }
-            if header.creature_count as usize != states.len() || header.reserved0 != [0; 4] {
-                // A header disagreeing with its own rows is the mismatch decode refuses; a
-                // nonzero reserved is the other. Same refusals, sending side.
-                return if header.reserved0 != [0; 4] {
-                    Err(EncodeError::ReservedNotZero)
-                } else {
-                    Err(EncodeError::CountOverCap {
-                        count: header.creature_count as usize,
-                    })
-                };
+            if header.reserved0 != [0; 4] {
+                return Err(EncodeError::ReservedNotZero);
+            }
+            if header.creature_count as usize != states.len() {
+                // A header disagreeing with its own rows is the mismatch decode refuses — named
+                // as what it is, not mislabelled as a cap violation.
+                return Err(EncodeError::CountRowsMismatch {
+                    count: header.creature_count,
+                    rows: states.len(),
+                });
             }
             frame_header(out, MessageType::TickState, TICK_HEADER_BYTES + states.len() * CREATURE_STATE_BYTES);
             out.extend_from_slice(&header.tick.to_le_bytes());
@@ -300,12 +316,19 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             }
         }
         Message::Actions(actions) => {
+            if actions.reserved0 != [0; 4] {
+                return Err(EncodeError::ReservedNotZero);
+            }
             frame_header(out, MessageType::Actions, size_of::<Actions>());
             out.extend_from_slice(&actions.tick.to_le_bytes());
             out.extend_from_slice(&actions.creature_id.to_le_bytes());
             out.extend_from_slice(&actions.desired_forward_speed.to_le_bytes());
             out.extend_from_slice(&actions.desired_turn_rate.to_le_bytes());
             out.extend_from_slice(&actions.vocalisation_strength.to_le_bytes());
+            out.extend_from_slice(&actions.previous_forward_speed.to_le_bytes());
+            out.extend_from_slice(&actions.previous_turn_rate.to_le_bytes());
+            out.extend_from_slice(&actions.previous_vocalisation.to_le_bytes());
+            out.extend_from_slice(&actions.reserved0);
         }
         Message::Event(event) => {
             if event.kind != EventKind::Vocalisation as u8 {
@@ -424,6 +447,10 @@ mod tests {
                 desired_forward_speed: 1.5,
                 desired_turn_rate: -0.5,
                 vocalisation_strength: 1.0,
+                previous_forward_speed: 1.25,
+                previous_turn_rate: 0.5,
+                previous_vocalisation: 0.0,
+                reserved0: [0; 4],
             }),
             Message::Event(Event {
                 tick: 43,
@@ -560,6 +587,45 @@ mod tests {
                 count: TICK_STATE_MAX_CREATURES as usize + 1
             })
         );
+
+        // A header claiming three rows over two actual ones, both under the cap: the refusal
+        // names the mismatch it is, not a cap nobody exceeded.
+        let lying = sample_tick_state(2);
+        let Message::TickState { header, states } = lying else { unreachable!() };
+        let lying_count = Message::TickState {
+            header: TickStateHeader { creature_count: 3, ..header },
+            states,
+        };
+        assert_eq!(encode(&lying_count, &mut out), Err(EncodeError::CountRowsMismatch { count: 3, rows: 2 }));
+        assert!(out.is_empty(), "a refused encode must write nothing");
+    }
+
+    #[test]
+    fn an_actions_reserved_word_must_be_zero_both_ways() {
+        fn sample_actions() -> Message {
+            Message::Actions(Actions {
+                tick: 42,
+                creature_id: 3,
+                desired_forward_speed: 1.5,
+                desired_turn_rate: -0.5,
+                vocalisation_strength: 1.0,
+                previous_forward_speed: 1.25,
+                previous_turn_rate: 0.5,
+                previous_vocalisation: 0.0,
+                reserved0: [0; 4],
+            })
+        }
+
+        let Message::Actions(mut actions) = sample_actions() else { unreachable!() };
+        actions.reserved0 = [1, 0, 0, 0];
+        let mut out = Vec::new();
+        assert_eq!(encode(&Message::Actions(actions), &mut out), Err(EncodeError::ReservedNotZero));
+        assert!(out.is_empty(), "a refused encode must write nothing");
+
+        let mut frame = frame_of(&sample_actions());
+        let reserved_offset = FRAME_HEADER_BYTES + 36;
+        frame[reserved_offset] = 1;
+        assert_eq!(decode(MessageType::Actions as u8, &frame[FRAME_HEADER_BYTES..]), Err(DecodeError::ReservedNotZero));
     }
 
     #[test]
