@@ -42,7 +42,7 @@ extern "C"
 /*! Bumped whenever this table or its rules change. lnkGetClientVTable refuses any other
     number, so a consumer built against a stale copy of this header is told at load time
     rather than corrupted at call time. */
-#define LNK_CLIENT_ABI_VERSION 3u
+#define LNK_CLIENT_ABI_VERSION 4u
 
 /*
     Statuses. Zero is success and only success; everything else names its failure. No function
@@ -93,6 +93,15 @@ typedef struct LnkTickStateView {
     const LnkCreatureState* states; /*!< creature_count rows, library-owned. */
 } LnkTickStateView;
 
+/*! A received REZ: the header by value, the rows by borrow with the same lifetime rules as the
+    tick state's - valid until the next poll() or close() on the same client. */
+typedef struct LnkRezView {
+    LnkRez rez;
+    const LnkRezVertex* vertices;    /*!< vertex_count rows, library-owned. */
+    const LnkRezTriangle* triangles; /*!< triangle_count rows, library-owned. */
+    const LnkRezMaterial* materials; /*!< material_count rows, library-owned. */
+} LnkRezView;
+
 /*! One received message. `type` is the LNK_MSG_* that arrived and names the union member to
     read; BYE carries nothing, so the type alone says it all. This struct is API, not wire -
     it holds a pointer, so its size is the platform's business and nothing pins it. */
@@ -108,6 +117,7 @@ typedef struct LnkMessageView {
         LnkPong pong;
         LnkHello hello;     /*!< Never sent by an honest server; the view does not judge. */
         LnkActions actions; /*!< Likewise. The consumer decides what arriving here means. */
+        LnkRezView rez;     /*!< A creature entering the world, validated whole by the wire. */
     } as;
 } LnkMessageView;
 
@@ -124,13 +134,21 @@ typedef struct LnkClientVTable {
     /*! The fingerprint this library's HELLO carries, for logs and for curiosity. */
     void (*protocol_fingerprint)(uint8_t out_fingerprint[32]);
 
-    /*! The whole handshake: magic, HELLO with this library's own fingerprint, WELCOME back.
-        Blocking, bounded by the timeout per read. On success returns the client and writes the
-        WELCOME. On failure returns NULL, writes the status, and writes a NUL-terminated UTF-8
-        line into the detail buffer - the server's refusal verbatim when there is one. `role`
-        is LNK_ROLE_SPECTATOR or LNK_ROLE_CREATURE_HOST; `address_utf8` is host:port. */
-    LnkClient* (*connect)(const char* address_utf8, uint8_t role, uint32_t timeout_milliseconds, LnkWelcome* out_welcome, LnkStatus* out_status,
-                          char* out_detail_utf8, uint32_t detail_capacity_bytes);
+    /*! The one implementation of the world fingerprint: FNV-1a over the definition's bytes in
+        field order. Every citizen computes its own from its own values through this very
+        function, so two ends disagreeing can only mean their *values* disagree. */
+    uint64_t (*world_fingerprint)(const LnkWorldDefinition* definition);
+
+    /*! The whole handshake: magic, HELLO with this library's own fingerprint and the caller's
+        world fingerprint, WELCOME back - whose world fingerprint is compared against the
+        caller's, because the skew check bites in both directions and a client must not
+        perceive a world it would silently mis-place. Blocking, bounded by the timeout per
+        read. On success returns the client and writes the WELCOME. On failure returns NULL,
+        writes the status, and writes a NUL-terminated UTF-8 line into the detail buffer - the
+        server's refusal verbatim when there is one. `role` is LNK_ROLE_SPECTATOR or
+        LNK_ROLE_CREATURE_HOST; `address_utf8` is host:port. */
+    LnkClient* (*connect)(const char* address_utf8, uint8_t role, uint64_t world_fingerprint, uint32_t timeout_milliseconds, LnkWelcome* out_welcome,
+                          LnkStatus* out_status, char* out_detail_utf8, uint32_t detail_capacity_bytes);
 
     /*! One complete message if the socket holds one (LNK_OK, view written), LNK_NOTHING_YET if
         it does not. Never blocks. Any other status ends the connection's useful life. On a
@@ -143,6 +161,14 @@ typedef struct LnkClientVTable {
         LNK_BAD_ARGUMENT on a connection that introduced itself as a spectator: a spectator
         never sends ACTIONS, and the refusal starts at the sending half. */
     LnkStatus (*send_actions)(LnkClient* client, const LnkActions* actions);
+
+    /*! Stage a REZ: the header, then its counted rows read from the three arrays. Every count
+        is validated against its cap, every index against its count and every float for
+        finiteness BEFORE a single row is copied - the caller gets exactly the trust a stranger
+        would. Bodiless is legitimate: all three counts zero, all three pointers ignored.
+        Refused with LNK_BAD_ARGUMENT on a spectator connection, exactly as ACTIONS is. */
+    LnkStatus (*send_rez)(LnkClient* client, const LnkRez* rez, const LnkRezVertex* vertices, const LnkRezTriangle* triangles,
+                          const LnkRezMaterial* materials);
 
     /*! Stage a PING carrying the nonce; the answering PONG arrives through poll(). */
     LnkStatus (*send_ping)(LnkClient* client, uint64_t nonce);

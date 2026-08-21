@@ -49,7 +49,7 @@ extern "C"
     carries the header's fingerprint rather than this number, so two ends disagreeing about the
     bytes are refused even when they agree about the number; the number exists for the
     human-readable refusal. */
-#define LNK_PROTOCOL_VERSION 3u
+#define LNK_PROTOCOL_VERSION 4u
 
 /*! The port Master Control listens on when nobody names another - a default and only a
     default: the client's positional argument carries any host and port, and Master Control
@@ -108,12 +108,6 @@ extern "C"
 
 /*
     Message types. One byte on the wire. Type 0 is invalid, deliberately.
-
-    REZ's payload layout is not in this header yet: it must flatten TglCreatureDesc - whose eye
-    and ear descriptors carry nested arrays - and that flattening is designed against the
-    flagship's validator as its first consumer. The type number is reserved here so that nothing
-    else ever takes it; a v1 end that receives REZ refuses it as unknown, which is the honest
-    behaviour for a message it cannot yet parse.
 */
 #define LNK_MSG_HELLO 1u
 #define LNK_MSG_WELCOME 2u
@@ -126,9 +120,9 @@ extern "C"
 #define LNK_MSG_PONG 9u
 #define LNK_MSG_BYE 10u
 
-/*! What a client is, stated in HELLO. Zero is invalid. A spectator never sends ACTIONS, and the
-    refusal is enforced inside this library on both ends - the sending half refuses to stage
-    ACTIONS on a spectator connection, and the server half treats an ACTIONS frame arriving on
+/*! What a client is, stated in HELLO. Zero is invalid. A spectator never sends ACTIONS or REZ,
+    and the refusal is enforced inside this library on both ends - the sending half refuses to
+    stage either on a spectator connection, and the server half treats such a frame arriving on
     one as a protocol violation and closes it. SourceTV's observers-fall-out-for-free, and the
     CS:GO coaching bug's lesson that spectator privilege is enforced where the authority lives,
     both as one mechanism that cannot drift because there is only one implementation. */
@@ -139,24 +133,112 @@ extern "C"
     state: a client that misses one has missed a sound, not the world. */
 #define LNK_EVENT_VOCALISATION 1u
 
+/*!
+    The shared simulation truth, gathered so it can be fingerprinted: the floor the physics
+    collides against, the tick length, and the height a body stands at. Every citizen of one
+    world must agree on these to the bit - a client whose floor disagrees with the server's
+    mis-places every creature *silently*, which is why the handshake refuses the skew instead.
+    Materials and sensor layouts are deliberately absent: they are perception, owned by the
+    clients, and a disagreement there mis-shades a picture rather than corrupting the world.
+
+    The fingerprint itself is computed by the loaded library (the vtable's world_fingerprint),
+    so there is exactly one implementation of the hash and consumers only supply their values.
+*/
+typedef struct LnkWorldDefinition {
+    uint32_t floor_cells;          /*!< Quads along each floor axis. */
+    float floor_cell_size;         /*!< Edge length of one quad, metres. */
+    float floor_height;            /*!< World Y of the lowest ground, metres. */
+    float relief_amplitude;        /*!< Metres the highest ground stands above floor_height. */
+    float relief_wavelength;       /*!< Metres between one landform and the next. */
+    uint32_t relief_octaves;       /*!< Layers of value noise. */
+    uint32_t relief_terraces;      /*!< Discrete height levels the relief snaps to. */
+    uint32_t relief_seed;          /*!< Which landscape. */
+    float dt_seconds;              /*!< Seconds per tick - the sacred number. */
+    float body_half_height;        /*!< How far a body's origin stands above the ground, metres. */
+} LnkWorldDefinition;
+
 /*! HELLO, client to server, the first frame after the magic. The fingerprint is the raw SHA-256
     of this header as tools/check_protocol_version.py hashes it; the server compares it against
     its own and a mismatch earns a human-readable refusal naming both versions, then a closed
-    connection - refusal, not negotiation. */
+    connection - refusal, not negotiation. The world fingerprint is compared the same way: a
+    client living on a different floor is refused in words, never welcomed into a world it
+    would silently disagree with. */
 typedef struct LnkHello {
-    uint32_t protocol_version; /*!< LNK_PROTOCOL_VERSION as the client was built. */
-    uint8_t fingerprint[32];   /*!< SHA-256 of this header, raw bytes, from the fingerprint tool. */
-    uint8_t role;              /*!< LNK_ROLE_SPECTATOR or LNK_ROLE_CREATURE_HOST. */
-    uint8_t reserved0[3];      /*!< Always zero. Named so the asserts can count it. */
+    uint32_t protocol_version;  /*!< LNK_PROTOCOL_VERSION as the client was built. */
+    uint8_t fingerprint[32];    /*!< SHA-256 of this header, raw bytes, from the fingerprint tool. */
+    uint8_t role;               /*!< LNK_ROLE_SPECTATOR or LNK_ROLE_CREATURE_HOST. */
+    uint8_t reserved0[3];       /*!< Always zero. Named so the asserts can count it. */
+    uint64_t world_fingerprint; /*!< The vtable's world_fingerprint over the client's LnkWorldDefinition. */
 } LnkHello;
 
 /*! WELCOME, server to client, the acceptance of a HELLO. After it the server sends the REZ of
-    every live creature and then the next TICK_STATE - late join is not a special case. */
+    every live creature and then the next TICK_STATE - late join is not a special case. The
+    world fingerprint travels back too, so the *client* also refuses a server whose world it
+    could not faithfully perceive - the skew check bites in both directions. */
 typedef struct LnkWelcome {
-    uint64_t current_tick;     /*!< The tick the next TICK_STATE will carry or exceed. */
-    float nominal_dt_seconds;  /*!< Seconds per tick, the same number TglLibraryInfo carries. */
-    uint32_t client_id;        /*!< The server's name for this connection, echoed nowhere yet. */
+    uint64_t current_tick;      /*!< The tick the next TICK_STATE will carry or exceed. */
+    float nominal_dt_seconds;   /*!< Seconds per tick, the same number TglLibraryInfo carries. */
+    uint32_t client_id;         /*!< The server's name for this connection, echoed nowhere yet. */
+    uint64_t world_fingerprint; /*!< The vtable's world_fingerprint over the server's LnkWorldDefinition. */
 } LnkWelcome;
+
+/*
+    REZ: a creature enters the world. Creature host to server at hosting time; server to every
+    client on spawn and to every late joiner - late arrival is not a special case, so the same
+    payload serves both directions and the server relays what it validated.
+
+    The payload is the LnkRez header followed immediately by vertex_count LnkRezVertex rows,
+    then triangle_count LnkRezTriangle rows, then material_count LnkRezMaterial rows, and the
+    frame length must equal that sum exactly - counts bounds-checked against the caps below
+    BEFORE any copy, every triangle's vertex indices below vertex_count, every material index
+    below material_count, every float finite. This is the one variable-size client input - the
+    Dark Souls III shape - so its parsing is gold-plated like the framing itself, single-pass
+    and refuses whole.
+
+    What travels of the descriptor is the slice the world needs: the bounds the server clamps
+    intent against, and the contact budget. The sensor layout - eyes, ears, irradiance - stays
+    host-local, deliberately: senses are computed by the host that owns the creature, and the
+    day the sense spec moves server-side (the integrity ladder's last rung) it arrives as its
+    own message, not as freight on this one. A model of zero triangles is a legitimate bodiless
+    creature; its three counts are all zero and no rows follow.
+*/
+typedef struct LnkRez {
+    uint32_t creature_id;
+    float max_forward_speed;       /*!< Metres per second - the bound the server clamps to. */
+    float max_turn_rate;           /*!< Radians per second. */
+    float max_vocalisation_strength; /*!< 0 to 1. */
+    uint32_t max_contact_count;    /*!< The body's contact budget. */
+    uint32_t vertex_count;         /*!< Rows of LnkRezVertex following this header. */
+    uint32_t triangle_count;       /*!< Rows of LnkRezTriangle after the vertices. */
+    uint32_t material_count;       /*!< Rows of LnkRezMaterial after the triangles. */
+} LnkRez;
+
+/*! One vertex position in body frame, metres. */
+typedef struct LnkRezVertex {
+    float position[3];
+} LnkRezVertex;
+
+/*! One triangle: three vertex indices and the material its surface wears. */
+typedef struct LnkRezTriangle {
+    uint32_t vertices[3];
+    uint32_t material;
+} LnkRezTriangle;
+
+/*! One material, exactly the ABI's TglRenderMaterial shape: the smooth-limit model. */
+typedef struct LnkRezMaterial {
+    float colour[3];
+    float index_of_refraction;
+    float emission[3];
+    float transmission;
+} LnkRezMaterial;
+
+/*! The three caps of the one variable-size client input, named exactly as the audit demanded.
+    Sized so a full REZ fits one frame with room to spare, and generous against the first
+    body's eight triangles. The material cap is the one most likely to be forgotten - it guards
+    the shared slot space every triangle indexes into. */
+#define LNK_REZ_MAX_VERTICES 1024u
+#define LNK_REZ_MAX_TRIANGLES 2048u
+#define LNK_REZ_MAX_MATERIALS 16u
 
 /*! One creature's row in a TICK_STATE: pose, velocity and actuator, tick-stamped by the frame's
     header struct. Forty bytes, which is what makes a dozen creatures ~500 bytes per tick. */
@@ -275,12 +357,32 @@ typedef struct LnkPong {
 #define LNK_MEMBER_BYTES(type, member) sizeof(((type*)0)->member)
 
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkHello, protocol_version) + LNK_MEMBER_BYTES(LnkHello, fingerprint) + LNK_MEMBER_BYTES(LnkHello, role)
-                          + LNK_MEMBER_BYTES(LnkHello, reserved0)
+                          + LNK_MEMBER_BYTES(LnkHello, reserved0) + LNK_MEMBER_BYTES(LnkHello, world_fingerprint)
                       == sizeof(LnkHello),
                   "LnkHello has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkWelcome, current_tick) + LNK_MEMBER_BYTES(LnkWelcome, nominal_dt_seconds) + LNK_MEMBER_BYTES(LnkWelcome, client_id)
+                          + LNK_MEMBER_BYTES(LnkWelcome, world_fingerprint)
                       == sizeof(LnkWelcome),
                   "LnkWelcome has padding: a member changed width.");
+LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkWorldDefinition, floor_cells) + LNK_MEMBER_BYTES(LnkWorldDefinition, floor_cell_size)
+                          + LNK_MEMBER_BYTES(LnkWorldDefinition, floor_height) + LNK_MEMBER_BYTES(LnkWorldDefinition, relief_amplitude)
+                          + LNK_MEMBER_BYTES(LnkWorldDefinition, relief_wavelength) + LNK_MEMBER_BYTES(LnkWorldDefinition, relief_octaves)
+                          + LNK_MEMBER_BYTES(LnkWorldDefinition, relief_terraces) + LNK_MEMBER_BYTES(LnkWorldDefinition, relief_seed)
+                          + LNK_MEMBER_BYTES(LnkWorldDefinition, dt_seconds) + LNK_MEMBER_BYTES(LnkWorldDefinition, body_half_height)
+                      == sizeof(LnkWorldDefinition),
+                  "LnkWorldDefinition has padding: a member changed width.");
+LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkRez, creature_id) + LNK_MEMBER_BYTES(LnkRez, max_forward_speed) + LNK_MEMBER_BYTES(LnkRez, max_turn_rate)
+                          + LNK_MEMBER_BYTES(LnkRez, max_vocalisation_strength) + LNK_MEMBER_BYTES(LnkRez, max_contact_count)
+                          + LNK_MEMBER_BYTES(LnkRez, vertex_count) + LNK_MEMBER_BYTES(LnkRez, triangle_count) + LNK_MEMBER_BYTES(LnkRez, material_count)
+                      == sizeof(LnkRez),
+                  "LnkRez has padding: a member changed width.");
+LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkRezVertex, position) == sizeof(LnkRezVertex), "LnkRezVertex has padding: a member changed width.");
+LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkRezTriangle, vertices) + LNK_MEMBER_BYTES(LnkRezTriangle, material) == sizeof(LnkRezTriangle),
+                  "LnkRezTriangle has padding: a member changed width.");
+LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkRezMaterial, colour) + LNK_MEMBER_BYTES(LnkRezMaterial, index_of_refraction)
+                          + LNK_MEMBER_BYTES(LnkRezMaterial, emission) + LNK_MEMBER_BYTES(LnkRezMaterial, transmission)
+                      == sizeof(LnkRezMaterial),
+                  "LnkRezMaterial has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkCreatureState, creature_id) + LNK_MEMBER_BYTES(LnkCreatureState, position) + LNK_MEMBER_BYTES(LnkCreatureState, yaw)
                           + LNK_MEMBER_BYTES(LnkCreatureState, velocity) + LNK_MEMBER_BYTES(LnkCreatureState, yaw_rate)
                           + LNK_MEMBER_BYTES(LnkCreatureState, vocalisation)
@@ -305,8 +407,12 @@ LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkDerez, tick) + LNK_MEMBER_BYTES(LnkDerez, 
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkPing, nonce) == sizeof(LnkPing), "LnkPing has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkPong, nonce) == sizeof(LnkPong), "LnkPong has padding: a member changed width.");
 
-LNK_STATIC_ASSERT(sizeof(LnkHello) == 40u, "LnkHello must be 40 bytes: version, fingerprint, role, reserved.");
-LNK_STATIC_ASSERT(sizeof(LnkWelcome) == 16u, "LnkWelcome must be 16 bytes: tick, dt, client id.");
+LNK_STATIC_ASSERT(sizeof(LnkHello) == 48u, "LnkHello must be 48 bytes: version, fingerprint, role, reserved, world fingerprint.");
+LNK_STATIC_ASSERT(sizeof(LnkWelcome) == 24u, "LnkWelcome must be 24 bytes: tick, dt, client id, world fingerprint.");
+LNK_STATIC_ASSERT(sizeof(LnkWorldDefinition) == 40u, "LnkWorldDefinition must be 40 bytes: the floor's eight numbers, dt, and the standing height.");
+LNK_STATIC_ASSERT(sizeof(LnkRez) == 32u, "LnkRez must be 32 bytes: identity, the bounds, the contact budget, three counts.");
+LNK_STATIC_ASSERT(sizeof(LnkRezVertex) == 12u && sizeof(LnkRezTriangle) == 16u && sizeof(LnkRezMaterial) == 32u,
+                  "The REZ rows must stay exactly the sizes the length rule multiplies by.");
 LNK_STATIC_ASSERT(sizeof(LnkCreatureState) == 40u, "LnkCreatureState must be 40 bytes: id, pose, velocity, voice.");
 LNK_STATIC_ASSERT(sizeof(LnkTickStateHeader) == 16u, "LnkTickStateHeader must be 16 bytes: tick, count, reserved.");
 LNK_STATIC_ASSERT(sizeof(LnkActions) == 40u,
@@ -317,6 +423,10 @@ LNK_STATIC_ASSERT(sizeof(LnkPing) == 8u && sizeof(LnkPong) == 8u, "LnkPing and L
 
 LNK_STATIC_ASSERT(sizeof(LnkTickStateHeader) + LNK_TICK_STATE_MAX_CREATURES * sizeof(LnkCreatureState) <= LNK_FRAME_PAYLOAD_LIMIT,
                   "A full TICK_STATE must fit one frame: shrink LNK_TICK_STATE_MAX_CREATURES or redesign the framing.");
+LNK_STATIC_ASSERT(sizeof(LnkRez) + LNK_REZ_MAX_VERTICES * sizeof(LnkRezVertex) + LNK_REZ_MAX_TRIANGLES * sizeof(LnkRezTriangle)
+                          + LNK_REZ_MAX_MATERIALS * sizeof(LnkRezMaterial)
+                      <= LNK_FRAME_PAYLOAD_LIMIT,
+                  "A maximal REZ must fit one frame: shrink a cap or redesign the framing.");
 
 #ifdef __cplusplus
 }
