@@ -20,7 +20,7 @@ use crate::transport::{Connection, Listener, TransportError, connect, listen, lo
 
 /// `LNK_CLIENT_ABI_VERSION`: bumped whenever the vtable or its rules change. The twin lives in
 /// `lnk_client.h`, and a test holds the two together.
-pub const LNK_CLIENT_ABI_VERSION: u32 = 2;
+pub const LNK_CLIENT_ABI_VERSION: u32 = 3;
 
 pub type LnkStatus = i32;
 
@@ -175,8 +175,8 @@ fn guarded<R>(fallback: R, run: impl FnOnce() -> R) -> R {
 
 fn status_of(error: &TransportError) -> LnkStatus {
     match error {
-        TransportError::Io(_) => LNK_IO,
-        TransportError::Frame(_) => LNK_FRAME_REFUSED,
+        TransportError::Io(_) | TransportError::WriteBufferOverflow => LNK_IO,
+        TransportError::Frame(_) | TransportError::ActionsFromSpectator => LNK_FRAME_REFUSED,
         TransportError::Refused { .. } => LNK_REFUSED,
         TransportError::Garbled(_) => LNK_GARBLED,
         TransportError::PeerClosed => LNK_PEER_CLOSED,
@@ -192,6 +192,8 @@ fn detail_of(error: &TransportError) -> String {
         TransportError::Garbled(expectation) => format!("link: garbled handshake: {expectation}"),
         TransportError::PeerClosed => "link: the peer closed the connection".to_string(),
         TransportError::HandshakeTimedOut => "link: the handshake timed out".to_string(),
+        TransportError::ActionsFromSpectator => "link: a spectator sent ACTIONS - the connection is over".to_string(),
+        TransportError::WriteBufferOverflow => "link: the write buffer overflowed - the peer is not reading".to_string(),
     }
 }
 
@@ -359,12 +361,22 @@ fn queue_on(client: *mut LnkClient, message: &Message) -> LnkStatus {
 
 extern "C" fn send_actions_impl(client: *mut LnkClient, actions: *const Actions) -> LnkStatus {
     guarded(LNK_PANIC, || {
-        if actions.is_null() {
+        if actions.is_null() || client.is_null() {
+            return LNK_BAD_ARGUMENT;
+        }
+        // SAFETY: non-null was just checked; validity is the header's stated contract.
+        let inner = unsafe { inner_of(client) };
+        if !inner.connection.may_send_actions() {
+            // A spectator never sends ACTIONS, and the refusal starts at the sending half so an
+            // honest client cannot even stage the violation the server end would hang up on.
             return LNK_BAD_ARGUMENT;
         }
         // SAFETY: non-null was just checked; Actions is plain old data, read by copy.
         let actions = unsafe { *actions };
-        queue_on(client, &Message::Actions(actions))
+        match inner.connection.queue(&Message::Actions(actions)) {
+            Ok(()) => LNK_OK,
+            Err(_) => LNK_BAD_ARGUMENT,
+        }
     })
 }
 
@@ -756,6 +768,10 @@ mod tests {
             desired_forward_speed: 1.5,
             desired_turn_rate: -0.25,
             vocalisation_strength: 0.0,
+            previous_forward_speed: 1.25,
+            previous_turn_rate: -0.5,
+            previous_vocalisation: 0.0,
+            reserved0: [0; 4],
         };
         assert_eq!((table.send_actions)(client, &raw const actions), LNK_OK);
         assert_eq!((table.send_ping)(client, 0xC0FFEE), LNK_OK);
@@ -817,8 +833,72 @@ mod tests {
     }
 
     #[test]
-    fn version_one_is_history() {
-        assert!(lnkGetClientVTable(1).is_null(), "ABI 1 must be refused now that 2 exists");
+    fn old_versions_are_history() {
+        assert!(lnkGetClientVTable(1).is_null(), "ABI 1 must be refused now that 3 exists");
+        assert!(lnkGetClientVTable(2).is_null(), "ABI 2 must be refused now that 3 exists");
+    }
+
+    #[test]
+    fn a_spectator_cannot_stage_actions_and_a_creature_host_can() {
+        let table = vtable();
+        let mut status: LnkStatus = -1;
+        let server = (table.listen)(0, &raw mut status, std::ptr::null_mut(), 0);
+        assert_eq!(status, LNK_OK);
+        let port = (table.server_port)(server);
+
+        for (role, expected) in [(Role::Spectator, LNK_BAD_ARGUMENT), (Role::CreatureHost, LNK_OK)] {
+            let client_thread = std::thread::spawn(move || {
+                let table = vtable();
+                let address = CString::new(format!("127.0.0.1:{port}")).expect("address");
+                let mut welcome = unsafe { std::mem::zeroed::<Welcome>() };
+                let mut status: LnkStatus = -1;
+                let client = (table.connect)(address.as_ptr(), role as u8, 5_000, &raw mut welcome, &raw mut status, std::ptr::null_mut(), 0);
+                assert_eq!(status, LNK_OK);
+
+                let actions = Actions {
+                    tick: 7,
+                    creature_id: 1,
+                    desired_forward_speed: 1.0,
+                    desired_turn_rate: 0.0,
+                    vocalisation_strength: 0.0,
+                    previous_forward_speed: 0.5,
+                    previous_turn_rate: 0.0,
+                    previous_vocalisation: 0.0,
+                    reserved0: [0; 4],
+                };
+                let verdict = (table.send_actions)(client, &raw const actions);
+                (table.close)(client);
+                verdict
+            });
+
+            let mut hello = unsafe { std::mem::zeroed::<Hello>() };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let connection = loop {
+                let knock = (table.accept)(server, 5_000, &raw mut hello, &raw mut status, std::ptr::null_mut(), 0);
+                if !knock.is_null() {
+                    break knock;
+                }
+                assert_eq!(status, LNK_NOTHING_YET);
+                assert!(std::time::Instant::now() < deadline, "nobody knocked");
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            };
+            assert_eq!(hello.role, role as u8);
+
+            // The caller sends WELCOME itself, promptly - the client's connect blocks on it.
+            let welcome = Welcome {
+                current_tick: 1,
+                nominal_dt_seconds: 0.031_25,
+                client_id: 1,
+            };
+            assert_eq!((table.send_welcome)(connection, &raw const welcome), LNK_OK);
+            let mut everything_left = 0u8;
+            assert_eq!((table.flush)(connection, &raw mut everything_left), LNK_OK);
+
+            let verdict = client_thread.join().expect("client thread");
+            assert_eq!(verdict, expected, "role {role:?} staging ACTIONS answered the wrong status");
+            (table.close)(connection);
+        }
+        (table.close_server)(server);
     }
 
     #[test]

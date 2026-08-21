@@ -20,13 +20,26 @@ compile_error!("The Link protocol is little-endian on the wire; a big-endian hos
 /// `LNK_PROTOCOL_VERSION`: bumped whenever any declaration changes meaning or layout. The
 /// handshake carries the header's fingerprint rather than this number; the number exists for
 /// the human-readable refusal.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// `LNK_DEFAULT_PORT`: where Master Control listens when nobody names another port. A default
 /// and only a default. The number is the owner's: 30702, from JA-307020 — Tron's program
 /// designation — because the port is the doorway into the Grid and Tron is the security
 /// program who guards the system.
 pub const DEFAULT_PORT: u16 = 30_702;
+
+/// `LNK_KEEPALIVE_PING_MILLIS`: heard nothing for this long — send a PING. The library carries
+/// the constant and the obligation; the caller owns the clock.
+pub const KEEPALIVE_PING_MILLIS: u32 = 1_000;
+
+/// `LNK_KEEPALIVE_DEAD_MILLIS`: heard nothing for this long — the peer is dead, close the
+/// connection. What makes the dead-host liveness rule fire deterministically.
+pub const KEEPALIVE_DEAD_MILLIS: u32 = 10_000;
+
+/// `LNK_ACTIONS_REPEAT_TICKS`: how long a connected host's last accepted intent is re-applied
+/// when its ACTIONS are merely missing, before zeroed coast. One — repeat the last input, never
+/// stall, never rewind — bounded so a longer stall becomes honest coasting.
+pub const ACTIONS_REPEAT_TICKS: u32 = 1;
 
 /// The first four bytes a client ever sends: `LNK1`. Anything else earns a refusal and a closed
 /// connection before any frame is read.
@@ -66,8 +79,10 @@ pub enum MessageType {
     Bye = 10,
 }
 
-/// What a client is, stated in HELLO. Zero is invalid. A spectator never sends ACTIONS and a
-/// server refuses ACTIONS from one.
+/// What a client is, stated in HELLO. Zero is invalid. A spectator never sends ACTIONS, and the
+/// refusal lives in this library on both ends: the sending half refuses to stage ACTIONS on a
+/// spectator connection, and the server half treats an ACTIONS frame arriving on one as a
+/// protocol violation and closes it.
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Role {
@@ -143,9 +158,11 @@ pub struct TickStateHeader {
     pub reserved0: [u8; 4],
 }
 
-/// ACTIONS, creature host to server: the Program's staged intent for a future tick, exactly the
-/// twelve bytes of `TglActions` plus the address. The server executes the latest ACTIONS with
-/// tick ≤ the tick being stepped and discards stragglers; a creature with no ACTIONS coasts.
+/// ACTIONS, creature host to server: the Program's staged intent for a future tick — the twelve
+/// bytes of `TglActions` plus the address, and the previous tick's twelve piggybacked beside
+/// them so one lost or late message loses nothing. The server accepts through the window
+/// `[N, N+1)`, latest per (creature, tick) wins, dedupe makes the piggyback free; silence rules
+/// and [`ACTIONS_REPEAT_TICKS`] are documented in full on the C header and in TOPOLOGY.md.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Actions {
@@ -158,6 +175,14 @@ pub struct Actions {
     pub desired_turn_rate: f32,
     /// 0 to 1, clamped server-side.
     pub vocalisation_strength: f32,
+    /// The tick-1 intent, resent whole. Zeroes when none exists.
+    pub previous_forward_speed: f32,
+    /// See `previous_forward_speed`.
+    pub previous_turn_rate: f32,
+    /// See `previous_forward_speed`.
+    pub previous_vocalisation: f32,
+    /// Always zero. Counted rather than left as invisible alignment padding.
+    pub reserved0: [u8; 4],
 }
 
 /// EVENT, server to every client: a tick-stamped notification, never load-bearing state. The
@@ -230,7 +255,7 @@ const _: () = assert!(size_of::<Hello>() == 4 + 32 + 1 + 3 && size_of::<Hello>()
 const _: () = assert!(size_of::<Welcome>() == 8 + 4 + 4 && size_of::<Welcome>() == 16);
 const _: () = assert!(size_of::<CreatureState>() == 4 + 12 + 4 + 12 + 4 + 4 && size_of::<CreatureState>() == 40);
 const _: () = assert!(size_of::<TickStateHeader>() == 8 + 4 + 4 && size_of::<TickStateHeader>() == 16);
-const _: () = assert!(size_of::<Actions>() == 8 + 4 + 4 + 4 + 4 && size_of::<Actions>() == 24);
+const _: () = assert!(size_of::<Actions>() == 8 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 4 && size_of::<Actions>() == 40);
 const _: () = assert!(size_of::<Event>() == 8 + 12 + 4 + 4 + 1 + 3 && size_of::<Event>() == 32);
 const _: () = assert!(size_of::<Derez>() == 8 + 4 + 4 && size_of::<Derez>() == 16);
 const _: () = assert!(size_of::<Ping>() == 8 && size_of::<Pong>() == 8);
@@ -246,7 +271,7 @@ mod tests {
         assert_eq!(exact_payload_bytes(MessageType::Welcome), Some(16));
         assert_eq!(exact_payload_bytes(MessageType::Rez), None);
         assert_eq!(exact_payload_bytes(MessageType::TickState), None);
-        assert_eq!(exact_payload_bytes(MessageType::Actions), Some(24));
+        assert_eq!(exact_payload_bytes(MessageType::Actions), Some(40));
         assert_eq!(exact_payload_bytes(MessageType::Event), Some(32));
         assert_eq!(exact_payload_bytes(MessageType::Derez), Some(16));
         assert_eq!(exact_payload_bytes(MessageType::Ping), Some(8));
@@ -289,7 +314,7 @@ mod tests {
         assert_eq!(Role::Spectator as u8, 1);
         assert_eq!(Role::CreatureHost as u8, 2);
         assert_eq!(EventKind::Vocalisation as u8, 1);
-        assert_eq!(PROTOCOL_VERSION, 2);
+        assert_eq!(PROTOCOL_VERSION, 3);
         assert_eq!(DEFAULT_PORT, 30_702);
     }
 
@@ -303,12 +328,28 @@ mod tests {
             "LNK_PROTOCOL_VERSION drifted"
         );
         assert!(header.contains(&format!("#define LNK_DEFAULT_PORT {DEFAULT_PORT}u")), "LNK_DEFAULT_PORT drifted");
+        assert!(
+            header.contains(&format!("#define LNK_KEEPALIVE_PING_MILLIS {KEEPALIVE_PING_MILLIS}u")),
+            "LNK_KEEPALIVE_PING_MILLIS drifted"
+        );
+        assert!(
+            header.contains(&format!("#define LNK_KEEPALIVE_DEAD_MILLIS {KEEPALIVE_DEAD_MILLIS}u")),
+            "LNK_KEEPALIVE_DEAD_MILLIS drifted"
+        );
+        assert!(
+            header.contains(&format!("#define LNK_ACTIONS_REPEAT_TICKS {ACTIONS_REPEAT_TICKS}u")),
+            "LNK_ACTIONS_REPEAT_TICKS drifted"
+        );
     }
 
     #[test]
-    fn actions_carries_exactly_the_abis_twelve_bytes_plus_the_address() {
+    fn actions_carries_the_abis_twelve_bytes_twice_plus_the_address() {
         let intent_bytes = size_of::<f32>() * 3;
         assert_eq!(intent_bytes, 12, "TglActions is three floats; if that moved, this mirror moves with a version bump");
-        assert_eq!(size_of::<Actions>(), 8 + 4 + intent_bytes);
+        assert_eq!(
+            size_of::<Actions>(),
+            8 + 4 + intent_bytes + intent_bytes + 4,
+            "current intent plus the previous tick's resent whole, and a counted reserved word instead of invisible padding"
+        );
     }
 }

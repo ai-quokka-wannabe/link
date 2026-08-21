@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Protocol version 3: rigour ruled, silence given authors, and the wire resends so nothing is
+  lost.** The flagship's MMO-lessons audit (TOPOLOGY.md carries the rulings in full; the owner's
+  principle: no information may be lost, because this is an embodied-AI project and
+  repeatability is the product) lands on the wire as one version bump. **ACTIONS grows the
+  previous tick's intent, resent whole** — Tribes repeated its moves across datagrams for
+  exactly this reason; redundant on TCP, load-bearing the day the UDP trigger fires, adopted
+  while a message layout still changes for free — plus a counted reserved word, because the
+  alternative was four bytes of invisible alignment padding and invisible padding is exactly
+  what the header refuses (40 bytes; ABI v3, versions 1 and 2 refused as history). The header
+  now publishes the **keepalive contract** (PING after one second of silence, dead at ten —
+  constants both ends compile in, the caller owning the clock) and `LNK_ACTIONS_REPEAT_TICKS`,
+  the bounded repeat-last-intent window the silence rules name. **The spectator-ACTIONS rule the
+  header always stated is now enforced by the library itself, on both ends**: `send_actions`
+  refuses to stage them on a spectator connection (`LNK_BAD_ARGUMENT`), and the server half
+  treats an ACTIONS frame arriving from a spectator as a protocol violation that shuts the
+  connection (`LNK_FRAME_REFUSED`) — the CS:GO coaching lesson, enforced in the one shared
+  implementation where it cannot drift. The write buffer gained a **high-water mark** (one
+  megabyte — hundreds of full-world ticks — then `LNK_IO` and the connection is over, because
+  an unbounded buffer is an allocation the peer controls). Two refusals grew honest words: a
+  fingerprint mismatch at the *same* version now says "one of us carries a modified
+  lnk_protocol.h" instead of naming two equal numbers at each other, and a TICK_STATE header
+  disagreeing with its own rows is refused as the `CountRowsMismatch` it is rather than
+  mislabelled as a cap violation. `listen`'s IPv4-only loopback is now stated in its
+  documentation rather than discovered by an IPv6-preferring resolver. Thirty-five tests; four
+  new refusals each broken deliberately once, red exactly where they should be.
+
 ### Added
 
 - **The flagship's settings, mirrored.** Everything `tron-grid-lite` has settled about how a

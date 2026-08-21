@@ -42,7 +42,7 @@ extern "C"
 /*! Bumped whenever this table or its rules change. lnkGetClientVTable refuses any other
     number, so a consumer built against a stale copy of this header is told at load time
     rather than corrupted at call time. */
-#define LNK_CLIENT_ABI_VERSION 2u
+#define LNK_CLIENT_ABI_VERSION 3u
 
 /*
     Statuses. Zero is success and only success; everything else names its failure. No function
@@ -133,11 +133,15 @@ typedef struct LnkClientVTable {
                           char* out_detail_utf8, uint32_t detail_capacity_bytes);
 
     /*! One complete message if the socket holds one (LNK_OK, view written), LNK_NOTHING_YET if
-        it does not. Never blocks. Any other status ends the connection's useful life. */
+        it does not. Never blocks. Any other status ends the connection's useful life. On a
+        server-held connection whose HELLO said spectator, an arriving ACTIONS frame is the role
+        violation the protocol header names: LNK_FRAME_REFUSED, the socket already shut. */
     LnkStatus (*poll)(LnkClient* client, LnkMessageView* out_message);
 
-    /*! Stage the creature's intent for the next flush. The address and the twelve bytes,
-        exactly as ACTIONS on the wire. */
+    /*! Stage the creature's intent for the next flush - the current tick's twelve bytes and the
+        previous tick's twelve resent, exactly as ACTIONS on the wire. Refused with
+        LNK_BAD_ARGUMENT on a connection that introduced itself as a spectator: a spectator
+        never sends ACTIONS, and the refusal starts at the sending half. */
     LnkStatus (*send_actions)(LnkClient* client, const LnkActions* actions);
 
     /*! Stage a PING carrying the nonce; the answering PONG arrives through poll(). */
@@ -148,7 +152,10 @@ typedef struct LnkClientVTable {
 
     /*! One coalesced write per tick: push everything staged. Writes 1 to out_everything_left
         when the buffer emptied, 0 when the socket filled and the remainder is carried - call
-        again next tick. */
+        again next tick. The carried remainder is bounded: a peer that stops reading while a
+        megabyte accumulates earns LNK_IO and the connection is over, because an unbounded
+        buffer is an allocation the peer controls. The keepalive constants in lnk_protocol.h
+        usually reap such a peer first; the caller owns that clock. */
     LnkStatus (*flush)(LnkClient* client, uint8_t* out_everything_left);
 
     /*! Say BYE, close the socket, free everything the client owns. The pointer is dead after
@@ -163,7 +170,9 @@ typedef struct LnkClientVTable {
     */
 
     /*! Listens on the port - 127.0.0.1 only while the trust stance holds: a world reachable
-        from elsewhere is the trigger the deferred security tier waits behind. Port 0 asks the
+        from elsewhere is the trigger the deferred security tier waits behind. IPv4 loopback
+        only, deliberately narrow: ::1 is not bound, so a consumer must dial 127.0.0.1 rather
+        than a `localhost` an IPv6-preferring resolver might turn into ::1. Port 0 asks the
         operating system for any free port; server_port() answers which. NULL on failure with
         the status and detail written. */
     LnkServer* (*listen)(uint16_t port, LnkStatus* out_status, char* out_detail_utf8, uint32_t detail_capacity_bytes);
