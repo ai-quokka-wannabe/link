@@ -81,14 +81,16 @@ pub fn recorded_fingerprint() -> [u8; 32] {
 }
 
 /// The HELLO this build sends: its own protocol version and its own header's fingerprint. The
-/// one thing a caller chooses is what it is — spectator or creature host.
+/// caller chooses what it is — spectator or creature host — and which world it lives in, as
+/// the fingerprint over its own [`crate::protocol::WorldDefinition`].
 #[must_use]
-pub fn local_hello(role: Role) -> Hello {
+pub fn local_hello(role: Role, world_fingerprint: u64) -> Hello {
     Hello {
         protocol_version: PROTOCOL_VERSION,
         fingerprint: recorded_fingerprint(),
         role: role as u8,
         reserved0: [0; 3],
+        world_fingerprint,
     }
 }
 
@@ -220,9 +222,9 @@ impl Connection {
     }
 
     /// False exactly when this end introduced itself as a spectator: a spectator never sends
-    /// ACTIONS, and the sending half refuses to stage them.
+    /// ACTIONS or REZ, and the sending half refuses to stage either.
     #[must_use]
-    pub fn may_send_actions(&self) -> bool {
+    pub fn may_send_intents(&self) -> bool {
         !self.forbid_outgoing_actions
     }
 
@@ -234,7 +236,7 @@ impl Connection {
             None => Ok(None),
             Some((type_byte, payload)) => {
                 let message = decode(type_byte, &payload).map_err(TransportError::Frame)?;
-                if matches!(message, Message::Actions(_)) && self.forbid_incoming_actions {
+                if matches!(message, Message::Actions(_) | Message::Rez { .. }) && self.forbid_incoming_actions {
                     let _ = self.stream.shutdown(Shutdown::Both);
                     return Err(TransportError::ActionsFromSpectator);
                 }
@@ -335,6 +337,18 @@ pub fn connect<A: ToSocketAddrs>(address: A, hello: &Hello, timeout: Duration) -
         return Err(TransportError::Garbled("a WELCOME frame that decoded as something else"));
     };
 
+    // The skew check's client half: a server living on a different floor is walked away from,
+    // because a client must not perceive a world it would silently mis-place.
+    if welcome.world_fingerprint != hello.world_fingerprint {
+        let _ = stream.shutdown(Shutdown::Both);
+        return Err(TransportError::Refused {
+            reason: format!(
+                "link: this end and the server live in different worlds - world fingerprint {:016X} here, {:016X} there - rebuild both ends from one world definition",
+                hello.world_fingerprint, welcome.world_fingerprint
+            ),
+        });
+    }
+
     Ok((Connection::framed(stream, false, hello.role == Role::Spectator as u8)?, welcome))
 }
 
@@ -347,11 +361,12 @@ fn read_answer(stream: &mut TcpStream, header: &mut [u8; FRAME_HEADER_BYTES]) ->
     }
 }
 
-/// The server half of the handshake: expect the magic, expect a HELLO, compare the fingerprint
-/// against this build's own, and refuse in words — bad magic, wrong contract, invalid role —
-/// or hand back the framed connection beside the client's HELLO. The caller sends WELCOME
-/// itself, promptly: only it knows the current tick.
-pub fn accept(stream: TcpStream, timeout: Duration) -> Result<(Connection, Hello), TransportError> {
+/// The server half of the handshake: expect the magic, expect a HELLO, compare the protocol
+/// fingerprint against this build's own and the world fingerprint against the listener's, and
+/// refuse in words — bad magic, wrong contract, invalid role, a different world — or hand back
+/// the framed connection beside the client's HELLO. The caller sends WELCOME itself, promptly:
+/// only it knows the current tick.
+pub fn accept(stream: TcpStream, timeout: Duration, world_fingerprint: u64) -> Result<(Connection, Hello), TransportError> {
     let mut stream = stream;
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(timeout))?;
@@ -397,6 +412,18 @@ pub fn accept(stream: TcpStream, timeout: Duration) -> Result<(Connection, Hello
             )
         };
         return Err(refuse(&stream, reason));
+    }
+
+    // The skew check's server half: a citizen of a different world is refused at the door,
+    // because welcoming it would let two floors disagree about where every creature stands.
+    if hello.world_fingerprint != world_fingerprint {
+        return Err(refuse(
+            &stream,
+            format!(
+                "link: you live in a different world - world fingerprint {:016X} yours, {:016X} this world's - rebuild both ends from one world definition\n",
+                hello.world_fingerprint, world_fingerprint
+            ),
+        ));
     }
 
     Ok((Connection::framed(stream, hello.role == Role::Spectator as u8, false)?, hello))

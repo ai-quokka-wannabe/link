@@ -199,24 +199,29 @@ typedef struct LnkClientVTable {
         from elsewhere is the trigger the deferred security tier waits behind. IPv4 loopback
         only, deliberately narrow: ::1 is not bound, so a consumer must dial 127.0.0.1 rather
         than a `localhost` an IPv6-preferring resolver might turn into ::1. Port 0 asks the
-        operating system for any free port; server_port() answers which. NULL on failure with
-        the status and detail written. */
-    LnkServer* (*listen)(uint16_t port, LnkStatus* out_status, char* out_detail_utf8, uint32_t detail_capacity_bytes);
+        operating system for any free port; server_port() answers which. `world_fingerprint` is
+        this server's own, from the vtable's world_fingerprint over its LnkWorldDefinition:
+        accept() compares every HELLO's against it and refuses skew in words. NULL on failure
+        with the status and detail written. */
+    LnkServer* (*listen)(uint16_t port, uint64_t world_fingerprint, LnkStatus* out_status, char* out_detail_utf8, uint32_t detail_capacity_bytes);
 
     /*! The port the server actually listens on - the answer to listen(0), and the number a
         log should print. Zero for a NULL server. */
     uint16_t (*server_port)(LnkServer* server);
 
     /*! One knock, if somebody knocked: accepts a pending connection and walks the whole
-        handshake - magic, HELLO, the fingerprint comparison, refusals in words to the far end -
-        bounded by the timeout. LNK_NOTHING_YET when nobody is waiting; turn the loop and ask
-        again. On success returns the conversation - poll, flush and close apply to it exactly
-        as to a connected client - and writes the client's HELLO. The caller sends WELCOME
-        itself, promptly: only it knows the current tick. */
+        handshake - magic, HELLO, the protocol fingerprint comparison, the world fingerprint
+        comparison against the listener's own, refusals in words to the far end - bounded by
+        the timeout. LNK_NOTHING_YET when nobody is waiting; turn the loop and ask again. On
+        success returns the conversation - poll, flush and close apply to it exactly as to a
+        connected client - and writes the client's HELLO. The caller sends WELCOME itself,
+        promptly: only it knows the current tick. */
     LnkClient* (*accept)(LnkServer* server, uint32_t timeout_milliseconds, LnkHello* out_hello, LnkStatus* out_status,
                          char* out_detail_utf8, uint32_t detail_capacity_bytes);
 
-    /*! Stage the WELCOME that turns an accepted handshake into a citizen. */
+    /*! Stage the WELCOME that turns an accepted handshake into a citizen. The caller fills
+        `world_fingerprint` with its own - the same value it gave listen() - because the skew
+        check bites in both directions and the client verifies what it is welcomed into. */
     LnkStatus (*send_welcome)(LnkClient* connection, const LnkWelcome* welcome);
 
     /*! Stage a TICK_STATE: the header, then header->creature_count rows read from `states`.

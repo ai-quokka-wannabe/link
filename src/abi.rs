@@ -15,12 +15,15 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Duration;
 
 use crate::codec::Message;
-use crate::protocol::{Actions, CreatureState, Derez, Event, Hello, MessageType, PROTOCOL_VERSION, Ping, Pong, Role, TickStateHeader, Welcome};
+use crate::protocol::{
+    Actions, CreatureState, Derez, Event, Hello, MessageType, PROTOCOL_VERSION, Ping, Pong, REZ_MAX_MATERIALS, REZ_MAX_TRIANGLES, REZ_MAX_VERTICES, Rez,
+    RezMaterial, RezTriangle, RezVertex, Role, TickStateHeader, Welcome, WorldDefinition, world_fingerprint,
+};
 use crate::transport::{Connection, Listener, TransportError, connect, listen, local_hello, recorded_fingerprint};
 
 /// `LNK_CLIENT_ABI_VERSION`: bumped whenever the vtable or its rules change. The twin lives in
 /// `lnk_client.h`, and a test holds the two together.
-pub const LNK_CLIENT_ABI_VERSION: u32 = 3;
+pub const LNK_CLIENT_ABI_VERSION: u32 = 4;
 
 pub type LnkStatus = i32;
 
@@ -47,6 +50,10 @@ struct ClientInner {
     /// The rows the last TICK_STATE view borrows from. Replaced on the next TICK_STATE, freed
     /// on close — exactly the lifetime the header promises the C side.
     tick_rows: Vec<CreatureState>,
+    /// The last REZ's rows, under the same borrow rules as the tick's.
+    rez_vertices: Vec<RezVertex>,
+    rez_triangles: Vec<RezTriangle>,
+    rez_materials: Vec<RezMaterial>,
 }
 
 /// The opaque handle a listening Master Control (or a test playing one) holds.
@@ -57,6 +64,8 @@ pub struct LnkServer {
 
 struct ServerInner {
     listener: Listener,
+    /// The world this server hosts, as its fingerprint: every HELLO is judged against it.
+    world_fingerprint: u64,
 }
 
 /// `LnkTickStateView`: the header by value, the rows by borrow from [`ClientInner::tick_rows`].

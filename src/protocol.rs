@@ -20,7 +20,7 @@ compile_error!("The Link protocol is little-endian on the wire; a big-endian hos
 /// `LNK_PROTOCOL_VERSION`: bumped whenever any declaration changes meaning or layout. The
 /// handshake carries the header's fingerprint rather than this number; the number exists for
 /// the human-readable refusal.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// `LNK_DEFAULT_PORT`: where Master Control listens when nobody names another port. A default
 /// and only a default. The number is the owner's: 30702, from JA-307020 — Tron's program
@@ -98,9 +98,55 @@ pub enum EventKind {
     Vocalisation = 1,
 }
 
+/// `LnkWorldDefinition`: the shared simulation truth, gathered so it can be fingerprinted -
+/// the floor physics collides against, the tick length, the standing height. Perception
+/// (materials, sensor layouts) is deliberately absent: skew there mis-shades a picture; skew
+/// here corrupts the world, silently, which is why the handshake refuses it instead.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct WorldDefinition {
+    pub floor_cells: u32,
+    pub floor_cell_size: f32,
+    pub floor_height: f32,
+    pub relief_amplitude: f32,
+    pub relief_wavelength: f32,
+    pub relief_octaves: u32,
+    pub relief_terraces: u32,
+    pub relief_seed: u32,
+    pub dt_seconds: f32,
+    pub body_half_height: f32,
+}
+
+/// The one implementation of the world fingerprint: FNV-1a over the definition's bytes in
+/// field order. Exposed through the vtable so every citizen computes its own through this very
+/// function - two ends disagreeing can only mean their *values* disagree.
+#[must_use]
+pub fn world_fingerprint(definition: &WorldDefinition) -> u64 {
+    let mut hash: u64 = 14_695_981_039_346_656_037;
+    let mut mix = |bits: u32| {
+        for byte in 0..4 {
+            hash ^= u64::from((bits >> (byte * 8)) & 0xFF);
+            hash = hash.wrapping_mul(1_099_511_628_211);
+        }
+    };
+    mix(definition.floor_cells);
+    mix(definition.floor_cell_size.to_bits());
+    mix(definition.floor_height.to_bits());
+    mix(definition.relief_amplitude.to_bits());
+    mix(definition.relief_wavelength.to_bits());
+    mix(definition.relief_octaves);
+    mix(definition.relief_terraces);
+    mix(definition.relief_seed);
+    mix(definition.dt_seconds.to_bits());
+    mix(definition.body_half_height.to_bits());
+    hash
+}
+
 /// HELLO, client to server, the first frame after the magic. The fingerprint is the raw SHA-256
 /// of the C header as the fingerprint tool hashes it; a mismatch earns a human-readable refusal
-/// naming both versions, then a closed connection — refusal, not negotiation.
+/// naming both versions, then a closed connection — refusal, not negotiation. The world
+/// fingerprint is compared the same way: a client living on a different floor is refused in
+/// words, never welcomed into a world it would silently disagree with.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Hello {
@@ -110,10 +156,13 @@ pub struct Hello {
     pub role: u8,
     /// Always zero.
     pub reserved0: [u8; 3],
+    /// [`world_fingerprint`] over the client's [`WorldDefinition`].
+    pub world_fingerprint: u64,
 }
 
 /// WELCOME, server to client, the acceptance of a HELLO. After it the server sends the REZ of
-/// every live creature and then the next TICK_STATE — late join is not a special case.
+/// every live creature and then the next TICK_STATE — late join is not a special case. The
+/// world fingerprint travels back too: the skew check bites in both directions.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Welcome {
@@ -123,7 +172,58 @@ pub struct Welcome {
     pub nominal_dt_seconds: f32,
     /// The server's name for this connection.
     pub client_id: u32,
+    /// [`world_fingerprint`] over the server's [`WorldDefinition`].
+    pub world_fingerprint: u64,
 }
+
+/// REZ, both directions: a creature enters the world. The header; then `vertex_count`
+/// [`RezVertex`] rows, `triangle_count` [`RezTriangle`] rows, `material_count` [`RezMaterial`]
+/// rows, the frame length equal to that sum exactly. What travels of the descriptor is the
+/// slice the world needs — the bounds and the contact budget; sensor layouts stay host-local.
+/// Bodiless is legitimate: three zero counts, no rows.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Rez {
+    pub creature_id: u32,
+    pub max_forward_speed: f32,
+    pub max_turn_rate: f32,
+    pub max_vocalisation_strength: f32,
+    pub max_contact_count: u32,
+    pub vertex_count: u32,
+    pub triangle_count: u32,
+    pub material_count: u32,
+}
+
+/// One vertex position in body frame, metres.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct RezVertex {
+    pub position: [f32; 3],
+}
+
+/// One triangle: three vertex indices and the material its surface wears.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RezTriangle {
+    pub vertices: [u32; 3],
+    pub material: u32,
+}
+
+/// One material, exactly the ABI's `TglRenderMaterial` shape: the smooth-limit model.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct RezMaterial {
+    pub colour: [f32; 3],
+    pub index_of_refraction: f32,
+    pub emission: [f32; 3],
+    pub transmission: f32,
+}
+
+/// The three caps of the one variable-size client input. The material cap is the one most
+/// likely to be forgotten — it guards the slot space every triangle indexes into.
+pub const REZ_MAX_VERTICES: u32 = 1_024;
+pub const REZ_MAX_TRIANGLES: u32 = 2_048;
+pub const REZ_MAX_MATERIALS: u32 = 16;
 
 /// One creature's row in a TICK_STATE: pose, velocity and actuator. Forty bytes, which is what
 /// makes a dozen creatures ~500 bytes per tick.
@@ -251,8 +351,18 @@ pub const fn exact_payload_bytes(message: MessageType) -> Option<usize> {
 // The same numbers the C header pins, pinned again. A sum of the declared fields beside the
 // whole struct's size, so a silently grown padding byte fails the build here exactly as it
 // fails it there.
-const _: () = assert!(size_of::<Hello>() == 4 + 32 + 1 + 3 && size_of::<Hello>() == 40);
-const _: () = assert!(size_of::<Welcome>() == 8 + 4 + 4 && size_of::<Welcome>() == 16);
+const _: () = assert!(size_of::<Hello>() == 4 + 32 + 1 + 3 + 8 && size_of::<Hello>() == 48);
+const _: () = assert!(size_of::<Welcome>() == 8 + 4 + 4 + 8 && size_of::<Welcome>() == 24);
+const _: () = assert!(size_of::<WorldDefinition>() == 10 * 4 && size_of::<WorldDefinition>() == 40);
+const _: () = assert!(size_of::<Rez>() == 8 * 4 && size_of::<Rez>() == 32);
+const _: () = assert!(size_of::<RezVertex>() == 12 && size_of::<RezTriangle>() == 16 && size_of::<RezMaterial>() == 32);
+const _: () = assert!(
+    size_of::<Rez>()
+        + REZ_MAX_VERTICES as usize * size_of::<RezVertex>()
+        + REZ_MAX_TRIANGLES as usize * size_of::<RezTriangle>()
+        + REZ_MAX_MATERIALS as usize * size_of::<RezMaterial>()
+        <= FRAME_PAYLOAD_LIMIT
+);
 const _: () = assert!(size_of::<CreatureState>() == 4 + 12 + 4 + 12 + 4 + 4 && size_of::<CreatureState>() == 40);
 const _: () = assert!(size_of::<TickStateHeader>() == 8 + 4 + 4 && size_of::<TickStateHeader>() == 16);
 const _: () = assert!(size_of::<Actions>() == 8 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 4 && size_of::<Actions>() == 40);
@@ -267,8 +377,8 @@ mod tests {
 
     #[test]
     fn every_fixed_message_declares_its_exact_size() {
-        assert_eq!(exact_payload_bytes(MessageType::Hello), Some(40));
-        assert_eq!(exact_payload_bytes(MessageType::Welcome), Some(16));
+        assert_eq!(exact_payload_bytes(MessageType::Hello), Some(48));
+        assert_eq!(exact_payload_bytes(MessageType::Welcome), Some(24));
         assert_eq!(exact_payload_bytes(MessageType::Rez), None);
         assert_eq!(exact_payload_bytes(MessageType::TickState), None);
         assert_eq!(exact_payload_bytes(MessageType::Actions), Some(40));
@@ -314,7 +424,7 @@ mod tests {
         assert_eq!(Role::Spectator as u8, 1);
         assert_eq!(Role::CreatureHost as u8, 2);
         assert_eq!(EventKind::Vocalisation as u8, 1);
-        assert_eq!(PROTOCOL_VERSION, 3);
+        assert_eq!(PROTOCOL_VERSION, 4);
         assert_eq!(DEFAULT_PORT, 30_702);
     }
 
@@ -340,6 +450,42 @@ mod tests {
             header.contains(&format!("#define LNK_ACTIONS_REPEAT_TICKS {ACTIONS_REPEAT_TICKS}u")),
             "LNK_ACTIONS_REPEAT_TICKS drifted"
         );
+        assert!(header.contains(&format!("#define LNK_REZ_MAX_VERTICES {REZ_MAX_VERTICES}u")), "LNK_REZ_MAX_VERTICES drifted");
+        assert!(
+            header.contains(&format!("#define LNK_REZ_MAX_TRIANGLES {REZ_MAX_TRIANGLES}u")),
+            "LNK_REZ_MAX_TRIANGLES drifted"
+        );
+        assert!(
+            header.contains(&format!("#define LNK_REZ_MAX_MATERIALS {REZ_MAX_MATERIALS}u")),
+            "LNK_REZ_MAX_MATERIALS drifted"
+        );
+    }
+
+    #[test]
+    fn the_world_fingerprint_answers_and_discriminates() {
+        let definition = WorldDefinition {
+            floor_cells: 64,
+            floor_cell_size: 2.0,
+            floor_height: 0.0,
+            relief_amplitude: 5.0,
+            relief_wavelength: 46.0,
+            relief_octaves: 3,
+            relief_terraces: 6,
+            relief_seed: 42,
+            dt_seconds: 0.031_25,
+            body_half_height: 0.05,
+        };
+        let fingerprint = world_fingerprint(&definition);
+        assert_ne!(fingerprint, 0, "a fingerprint of zero would look like an unset field");
+        assert_eq!(fingerprint, world_fingerprint(&definition), "the same world answers the same bits");
+
+        let mut other_floor = definition;
+        other_floor.relief_seed = 43;
+        assert_ne!(world_fingerprint(&other_floor), fingerprint, "a different landscape is a different world");
+
+        let mut other_dt = definition;
+        other_dt.dt_seconds = 0.02;
+        assert_ne!(world_fingerprint(&other_dt), fingerprint, "a bent dt is a different world too");
     }
 
     #[test]
