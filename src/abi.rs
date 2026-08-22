@@ -296,7 +296,7 @@ fn guarded<R>(fallback: R, run: impl FnOnce() -> R) -> R {
 fn status_of(error: &TransportError) -> LnkStatus {
     match error {
         TransportError::Io(_) | TransportError::WriteBufferOverflow => LNK_IO,
-        TransportError::Frame(_) | TransportError::ActionsFromSpectator | TransportError::ProprioceptionAtServer => LNK_FRAME_REFUSED,
+        TransportError::Frame(_) | TransportError::ActionsFromSpectator | TransportError::WrongWay(_) => LNK_FRAME_REFUSED,
         TransportError::Refused { .. } => LNK_REFUSED,
         TransportError::Garbled(_) => LNK_GARBLED,
         TransportError::PeerClosed => LNK_PEER_CLOSED,
@@ -313,7 +313,14 @@ fn detail_of(error: &TransportError) -> String {
         TransportError::PeerClosed => "link: the peer closed the connection".to_string(),
         TransportError::HandshakeTimedOut => "link: the handshake timed out".to_string(),
         TransportError::ActionsFromSpectator => "link: a spectator sent ACTIONS - the connection is over".to_string(),
-        TransportError::ProprioceptionAtServer => "link: a client sent PROPRIOCEPTION, which only a server may - the connection is over".to_string(),
+        TransportError::WrongWay(name) => {
+            let (sender, owner) = if matches!(*name, "HELLO" | "ACTIONS") {
+                ("the server", "a client")
+            } else {
+                ("a client", "the server")
+            };
+            format!("link: {sender} sent {name}, which only {owner} may - the connection is over")
+        }
         TransportError::WriteBufferOverflow => "link: the write buffer overflowed - the peer is not reading".to_string(),
     }
 }
