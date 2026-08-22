@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Protocol version 4: the body goes on the wire, and both ends must live in one world.**
+  `REZ` is no longer a reserved number: it carries the creature's bounds (forward speed, turn
+  rate, vocalisation strength, contact budget) and its render model as counted rows —
+  `LnkRezVertex`, `LnkRezTriangle` (three indices and a material slot), `LnkRezMaterial` (the
+  flagship's `TglRenderMaterial`, byte for byte) — the same payload a host sends at rez and
+  Master Control relays to every spectator and late joiner. It is the one variable-size client
+  input, and the Dark Souls III lesson shapes it: three named caps (1024 vertices, 2048
+  triangles, 16 materials — the material cap being the one guarding the slot space every
+  triangle indexes into), counts judged against them before a single row is read, the exact
+  length judged before any copy, every triangle index bounded by the counts, every float
+  finite, both when decoding a stranger's frame and when encoding our own caller's. Sensor
+  layouts are deliberately not on this wire: they are host-local. The largest legal frame is
+  now a full body rather than a full tick, and the receive buffer follows. **The world
+  fingerprint**: `LnkWorldDefinition` (the floor's eight fields, the tick, the body's half
+  height — what the simulated world is made of, materials and perception excluded) hashes by
+  FNV-1a over its bytes in field order, through one implementation exposed as the new vtable
+  function `world_fingerprint`; `HELLO` carries the client's (48 bytes) and `WELCOME` the
+  server's (24 bytes), and the refusal bites both ways — the server refuses a citizen of
+  another world at the door, and a client refuses a server whose `WELCOME` names a different
+  world, each in words naming both fingerprints. `connect` and `listen` take the fingerprint;
+  `send_rez` joins the table after `send_actions`, and refuses on a spectator connection exactly
+  as `send_actions` does, while the server half treats a spectator's `REZ` frame as the same
+  violation as its `ACTIONS`. ABI v4; versions 1 to 3 refused as history. Every rule above has a
+  test, and every test was broken once before it was trusted.
 - **Protocol version 3: rigour ruled, silence given authors, and the wire resends so nothing is
   lost.** The flagship's MMO-lessons audit (TOPOLOGY.md carries the rulings in full; the owner's
   principle: no information may be lost, because this is an embodied-AI project and

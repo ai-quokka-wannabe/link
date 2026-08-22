@@ -12,7 +12,8 @@
 //! [`decode`]. The codec never panics on any input; every failure is a named [`DecodeError`].
 
 use crate::protocol::{
-    Actions, CreatureState, Derez, Event, EventKind, FRAME_HEADER_BYTES, Hello, MessageType, Ping, Pong, Role, TICK_STATE_MAX_CREATURES, TickStateHeader, Welcome,
+    Actions, CreatureState, Derez, Event, EventKind, FRAME_HEADER_BYTES, Hello, MessageType, Ping, Pong, REZ_MAX_MATERIALS, REZ_MAX_TRIANGLES, REZ_MAX_VERTICES, Rez,
+    RezMaterial, RezTriangle, RezVertex, Role, TICK_STATE_MAX_CREATURES, TickStateHeader, Welcome,
 };
 
 /// A decoded message, owning its payload. TICK_STATE's rows live in a `Vec` sized only after
@@ -22,7 +23,16 @@ use crate::protocol::{
 pub enum Message {
     Hello(Hello),
     Welcome(Welcome),
-    TickState { header: TickStateHeader, states: Vec<CreatureState> },
+    Rez {
+        header: Rez,
+        vertices: Vec<RezVertex>,
+        triangles: Vec<RezTriangle>,
+        materials: Vec<RezMaterial>,
+    },
+    TickState {
+        header: TickStateHeader,
+        states: Vec<CreatureState>,
+    },
     Actions(Actions),
     Event(Event),
     Derez(Derez),
@@ -53,6 +63,16 @@ pub enum DecodeError {
     /// Reserved bytes must be zero. A nonzero one is either corruption or a future version
     /// talking to a past one, and both deserve refusal rather than a shrug.
     ReservedNotZero,
+    /// A REZ count beyond its cap — refused before any row is read, because the one
+    /// variable-size client input is exactly where parsers die.
+    RezCountOverCap { vertices: u32, triangles: u32, materials: u32 },
+    /// A REZ whose declared counts do not sum to its frame length.
+    RezLengthMismatch { expected: usize, got: usize },
+    /// A triangle naming a vertex or material that does not exist.
+    RezIndexOutOfRange { triangle: u32 },
+    /// A REZ float that is not a real number. A NaN vertex entering a hierarchy poisons a
+    /// traversal that fails somewhere else entirely, so it never crosses the wire.
+    RezNotFinite,
 }
 
 /// Why a message was refused at the sending end. Encode refuses exactly what decode refuses,
@@ -70,6 +90,17 @@ pub enum EncodeError {
     InvalidRole(u8),
     InvalidEventKind(u8),
     ReservedNotZero,
+    /// The REZ refusals, sending side — encode refuses exactly what decode refuses.
+    RezCountOverCap {
+        vertices: u32,
+        triangles: u32,
+        materials: u32,
+    },
+    RezCountRowsMismatch,
+    RezIndexOutOfRange {
+        triangle: u32,
+    },
+    RezNotFinite,
 }
 
 /// What a type byte's payload may look like, answerable from the three header bytes alone —
@@ -80,16 +111,29 @@ pub enum PayloadRule {
     Exact(usize),
     /// TICK_STATE: the length must be `header + rows * row` with `rows <= TICK_STATE_MAX_CREATURES`.
     TickState,
+    /// REZ: at least its header, at most a maximal body; the counts inside the header then
+    /// judge the exact sum before any row is copied.
+    Rez,
 }
 
 const TICK_HEADER_BYTES: usize = size_of::<TickStateHeader>();
 const CREATURE_STATE_BYTES: usize = size_of::<CreatureState>();
+const REZ_HEADER_BYTES: usize = size_of::<Rez>();
+
+const fn max_rez_payload_bytes() -> usize {
+    REZ_HEADER_BYTES
+        + REZ_MAX_VERTICES as usize * size_of::<RezVertex>()
+        + REZ_MAX_TRIANGLES as usize * size_of::<RezTriangle>()
+        + REZ_MAX_MATERIALS as usize * size_of::<RezMaterial>()
+}
 
 /// The most bytes any legal frame occupies on the wire, header included — a receive buffer this
-/// big can hold anything a v1 end may lawfully send.
+/// big can hold anything a lawful end may send. A maximal REZ outweighs a full TICK_STATE.
 #[must_use]
 pub const fn max_frame_bytes() -> usize {
-    FRAME_HEADER_BYTES + TICK_HEADER_BYTES + TICK_STATE_MAX_CREATURES as usize * CREATURE_STATE_BYTES
+    let tick = TICK_HEADER_BYTES + TICK_STATE_MAX_CREATURES as usize * CREATURE_STATE_BYTES;
+    let rez = max_rez_payload_bytes();
+    FRAME_HEADER_BYTES + if rez > tick { rez } else { tick }
 }
 
 /// The three header bytes, decoded: payload length and raw type byte. The inverse of what
@@ -106,6 +150,7 @@ pub const fn payload_rule(type_byte: u8) -> Result<PayloadRule, DecodeError> {
     match type_byte {
         t if t == MessageType::Hello as u8 => Ok(PayloadRule::Exact(size_of::<Hello>())),
         t if t == MessageType::Welcome as u8 => Ok(PayloadRule::Exact(size_of::<Welcome>())),
+        t if t == MessageType::Rez as u8 => Ok(PayloadRule::Rez),
         t if t == MessageType::TickState as u8 => Ok(PayloadRule::TickState),
         t if t == MessageType::Actions as u8 => Ok(PayloadRule::Exact(size_of::<Actions>())),
         t if t == MessageType::Event as u8 => Ok(PayloadRule::Exact(size_of::<Event>())),
@@ -138,6 +183,19 @@ pub const fn check_length(rule: PayloadRule, length: usize) -> Result<(), Decode
             }
             Ok(())
         }
+        PayloadRule::Rez => {
+            // The header-time bound: the counts live inside the payload, so the exact sum is
+            // judged in decode — but a frame that cannot possibly be a REZ dies here, before
+            // the transport asks the socket for its payload.
+            if length < REZ_HEADER_BYTES || length > max_rez_payload_bytes() {
+                Err(DecodeError::RezLengthMismatch {
+                    expected: REZ_HEADER_BYTES,
+                    got: length,
+                })
+            } else {
+                Ok(())
+            }
+        }
     }
 }
 
@@ -150,12 +208,14 @@ pub fn decode(type_byte: u8, payload: &[u8]) -> Result<Message, DecodeError> {
 
     match rule {
         PayloadRule::TickState => decode_tick_state(payload),
+        PayloadRule::Rez => decode_rez(payload),
         PayloadRule::Exact(_) => match type_byte {
             t if t == MessageType::Hello as u8 => decode_hello(payload),
             t if t == MessageType::Welcome as u8 => Ok(Message::Welcome(Welcome {
                 current_tick: read_u64(payload, 0),
                 nominal_dt_seconds: read_f32(payload, 8),
                 client_id: read_u32(payload, 12),
+                world_fingerprint: read_u64(payload, 16),
             })),
             t if t == MessageType::Actions as u8 => {
                 if payload[36..40] != [0; 4] {
@@ -207,7 +267,98 @@ fn decode_hello(payload: &[u8]) -> Result<Message, DecodeError> {
         fingerprint,
         role,
         reserved0: [0; 3],
+        world_fingerprint: read_u64(payload, 40),
     }))
+}
+
+/// The one variable-size client input, judged whole before a single row is copied: counts
+/// against caps, the exact length against the counts, every index against its count, every
+/// float for finiteness. Single-pass, refuses entire — the shape that survives its postmortems.
+fn decode_rez(payload: &[u8]) -> Result<Message, DecodeError> {
+    let header = Rez {
+        creature_id: read_u32(payload, 0),
+        max_forward_speed: read_f32(payload, 4),
+        max_turn_rate: read_f32(payload, 8),
+        max_vocalisation_strength: read_f32(payload, 12),
+        max_contact_count: read_u32(payload, 16),
+        vertex_count: read_u32(payload, 20),
+        triangle_count: read_u32(payload, 24),
+        material_count: read_u32(payload, 28),
+    };
+
+    if header.vertex_count > REZ_MAX_VERTICES || header.triangle_count > REZ_MAX_TRIANGLES || header.material_count > REZ_MAX_MATERIALS {
+        return Err(DecodeError::RezCountOverCap {
+            vertices: header.vertex_count,
+            triangles: header.triangle_count,
+            materials: header.material_count,
+        });
+    }
+
+    let expected = REZ_HEADER_BYTES
+        + header.vertex_count as usize * size_of::<RezVertex>()
+        + header.triangle_count as usize * size_of::<RezTriangle>()
+        + header.material_count as usize * size_of::<RezMaterial>();
+    if payload.len() != expected {
+        return Err(DecodeError::RezLengthMismatch { expected, got: payload.len() });
+    }
+
+    if !header.max_forward_speed.is_finite() || !header.max_turn_rate.is_finite() || !header.max_vocalisation_strength.is_finite() {
+        return Err(DecodeError::RezNotFinite);
+    }
+
+    let mut at = REZ_HEADER_BYTES;
+    let mut vertices = Vec::with_capacity(header.vertex_count as usize);
+    for _ in 0..header.vertex_count {
+        let position = [read_f32(payload, at), read_f32(payload, at + 4), read_f32(payload, at + 8)];
+        if position.iter().any(|axis| !axis.is_finite()) {
+            return Err(DecodeError::RezNotFinite);
+        }
+        vertices.push(RezVertex { position });
+        at += size_of::<RezVertex>();
+    }
+
+    let mut triangles = Vec::with_capacity(header.triangle_count as usize);
+    for index in 0..header.triangle_count {
+        let corner = [read_u32(payload, at), read_u32(payload, at + 4), read_u32(payload, at + 8)];
+        let material = read_u32(payload, at + 12);
+        if corner.iter().any(|vertex| *vertex >= header.vertex_count) || material >= header.material_count {
+            return Err(DecodeError::RezIndexOutOfRange { triangle: index });
+        }
+        triangles.push(RezTriangle { vertices: corner, material });
+        at += size_of::<RezTriangle>();
+    }
+
+    let mut materials = Vec::with_capacity(header.material_count as usize);
+    for _ in 0..header.material_count {
+        let material = RezMaterial {
+            colour: [read_f32(payload, at), read_f32(payload, at + 4), read_f32(payload, at + 8)],
+            index_of_refraction: read_f32(payload, at + 12),
+            emission: [read_f32(payload, at + 16), read_f32(payload, at + 20), read_f32(payload, at + 24)],
+            transmission: read_f32(payload, at + 28),
+        };
+        let fields = [
+            material.colour[0],
+            material.colour[1],
+            material.colour[2],
+            material.index_of_refraction,
+            material.emission[0],
+            material.emission[1],
+            material.emission[2],
+            material.transmission,
+        ];
+        if fields.iter().any(|field| !field.is_finite()) {
+            return Err(DecodeError::RezNotFinite);
+        }
+        materials.push(material);
+        at += size_of::<RezMaterial>();
+    }
+
+    Ok(Message::Rez {
+        header,
+        vertices,
+        triangles,
+        materials,
+    })
 }
 
 fn decode_event(payload: &[u8]) -> Result<Message, DecodeError> {
@@ -276,12 +427,93 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             out.extend_from_slice(&hello.fingerprint);
             out.push(hello.role);
             out.extend_from_slice(&hello.reserved0);
+            out.extend_from_slice(&hello.world_fingerprint.to_le_bytes());
         }
         Message::Welcome(welcome) => {
             frame_header(out, MessageType::Welcome, size_of::<Welcome>());
             out.extend_from_slice(&welcome.current_tick.to_le_bytes());
             out.extend_from_slice(&welcome.nominal_dt_seconds.to_le_bytes());
             out.extend_from_slice(&welcome.client_id.to_le_bytes());
+            out.extend_from_slice(&welcome.world_fingerprint.to_le_bytes());
+        }
+        Message::Rez {
+            header,
+            vertices,
+            triangles,
+            materials,
+        } => {
+            if header.vertex_count > REZ_MAX_VERTICES || header.triangle_count > REZ_MAX_TRIANGLES || header.material_count > REZ_MAX_MATERIALS {
+                return Err(EncodeError::RezCountOverCap {
+                    vertices: header.vertex_count,
+                    triangles: header.triangle_count,
+                    materials: header.material_count,
+                });
+            }
+            if header.vertex_count as usize != vertices.len() || header.triangle_count as usize != triangles.len() || header.material_count as usize != materials.len() {
+                return Err(EncodeError::RezCountRowsMismatch);
+            }
+            if !header.max_forward_speed.is_finite() || !header.max_turn_rate.is_finite() || !header.max_vocalisation_strength.is_finite() {
+                return Err(EncodeError::RezNotFinite);
+            }
+            for (index, triangle) in triangles.iter().enumerate() {
+                if triangle.vertices.iter().any(|vertex| *vertex >= header.vertex_count) || triangle.material >= header.material_count {
+                    #[allow(clippy::cast_possible_truncation)]
+                    return Err(EncodeError::RezIndexOutOfRange { triangle: index as u32 });
+                }
+            }
+            for vertex in vertices {
+                if vertex.position.iter().any(|axis| !axis.is_finite()) {
+                    return Err(EncodeError::RezNotFinite);
+                }
+            }
+            for material in materials {
+                let fields = [
+                    material.colour[0],
+                    material.colour[1],
+                    material.colour[2],
+                    material.index_of_refraction,
+                    material.emission[0],
+                    material.emission[1],
+                    material.emission[2],
+                    material.transmission,
+                ];
+                if fields.iter().any(|field| !field.is_finite()) {
+                    return Err(EncodeError::RezNotFinite);
+                }
+            }
+
+            let bytes =
+                REZ_HEADER_BYTES + vertices.len() * size_of::<RezVertex>() + triangles.len() * size_of::<RezTriangle>() + materials.len() * size_of::<RezMaterial>();
+            frame_header(out, MessageType::Rez, bytes);
+            out.extend_from_slice(&header.creature_id.to_le_bytes());
+            out.extend_from_slice(&header.max_forward_speed.to_le_bytes());
+            out.extend_from_slice(&header.max_turn_rate.to_le_bytes());
+            out.extend_from_slice(&header.max_vocalisation_strength.to_le_bytes());
+            out.extend_from_slice(&header.max_contact_count.to_le_bytes());
+            out.extend_from_slice(&header.vertex_count.to_le_bytes());
+            out.extend_from_slice(&header.triangle_count.to_le_bytes());
+            out.extend_from_slice(&header.material_count.to_le_bytes());
+            for vertex in vertices {
+                for axis in vertex.position {
+                    out.extend_from_slice(&axis.to_le_bytes());
+                }
+            }
+            for triangle in triangles {
+                for corner in triangle.vertices {
+                    out.extend_from_slice(&corner.to_le_bytes());
+                }
+                out.extend_from_slice(&triangle.material.to_le_bytes());
+            }
+            for material in materials {
+                for channel in material.colour {
+                    out.extend_from_slice(&channel.to_le_bytes());
+                }
+                out.extend_from_slice(&material.index_of_refraction.to_le_bytes());
+                for channel in material.emission {
+                    out.extend_from_slice(&channel.to_le_bytes());
+                }
+                out.extend_from_slice(&material.transmission.to_le_bytes());
+            }
         }
         Message::TickState { header, states } => {
             if states.len() > TICK_STATE_MAX_CREATURES as usize {
@@ -406,7 +638,45 @@ mod tests {
             fingerprint: [0xA5; 32],
             role: Role::CreatureHost as u8,
             reserved0: [0; 3],
+            world_fingerprint: 0x5EED,
         })
+    }
+
+    /// A REZ with every count as asked, each triangle indexing real vertices and a real
+    /// material - the body the tests rez, up to the largest one the wire admits.
+    fn sample_rez(vertices: u32, triangles: u32, materials: u32) -> Message {
+        let header = Rez {
+            creature_id: 42,
+            max_forward_speed: 1.0,
+            max_turn_rate: 1.5,
+            max_vocalisation_strength: 1.0,
+            max_contact_count: 4,
+            vertex_count: vertices,
+            triangle_count: triangles,
+            material_count: materials,
+        };
+        Message::Rez {
+            header,
+            vertices: (0..vertices)
+                .map(|index| RezVertex {
+                    position: [index as f32, 0.5, -1.0],
+                })
+                .collect(),
+            triangles: (0..triangles)
+                .map(|index| RezTriangle {
+                    vertices: [index % vertices.max(1), (index + 1) % vertices.max(1), (index + 2) % vertices.max(1)],
+                    material: index % materials.max(1),
+                })
+                .collect(),
+            materials: (0..materials)
+                .map(|index| RezMaterial {
+                    colour: [0.1, 0.2, index as f32],
+                    index_of_refraction: 1.5,
+                    emission: [0.0; 3],
+                    transmission: 0.0,
+                })
+                .collect(),
+        }
     }
 
     fn sample_tick_state(rows: u32) -> Message {
@@ -433,10 +703,14 @@ mod tests {
     fn everything() -> Vec<Message> {
         vec![
             sample_hello(),
+            sample_rez(0, 0, 0),
+            sample_rez(4, 2, 1),
+            sample_rez(REZ_MAX_VERTICES, REZ_MAX_TRIANGLES, REZ_MAX_MATERIALS),
             Message::Welcome(Welcome {
                 current_tick: 41,
                 nominal_dt_seconds: 0.03125,
                 client_id: 7,
+                world_fingerprint: 0x5EED,
             }),
             sample_tick_state(0),
             sample_tick_state(3),
@@ -510,7 +784,7 @@ mod tests {
 
     #[test]
     fn unknown_and_reserved_types_are_refused_before_any_copy() {
-        for type_byte in [0u8, MessageType::Rez as u8, 11, 200, 255] {
+        for type_byte in [0u8, 11, 200, 255] {
             assert_eq!(payload_rule(type_byte), Err(DecodeError::UnknownOrReservedType(type_byte)));
         }
     }
@@ -555,7 +829,12 @@ mod tests {
         payload[38] = 1;
         assert_eq!(decode(MessageType::Hello as u8, &payload), Err(DecodeError::ReservedNotZero));
 
-        let event = frame_of(&everything()[6]);
+        let event = frame_of(
+            everything()
+                .iter()
+                .find(|message| matches!(message, Message::Event(_)))
+                .expect("the sample set carries an EVENT"),
+        );
         let mut payload = event[FRAME_HEADER_BYTES..].to_vec();
         payload[28] = 0;
         assert_eq!(decode(MessageType::Event as u8, &payload), Err(DecodeError::InvalidEventKind(0)));
@@ -567,6 +846,7 @@ mod tests {
             fingerprint: [0; 32],
             role: 9,
             reserved0: [0; 3],
+            world_fingerprint: 0x5EED,
         });
         assert_eq!(encode(&bad_role, &mut out), Err(EncodeError::InvalidRole(9)));
         assert!(out.is_empty(), "a refused encode must write nothing");
@@ -637,9 +917,148 @@ mod tests {
 
     #[test]
     fn the_receive_buffer_constant_really_is_the_largest_legal_frame() {
-        let largest = frame_of(&sample_tick_state(TICK_STATE_MAX_CREATURES));
-        assert_eq!(largest.len(), max_frame_bytes());
+        // Since protocol v4 the largest legal frame is a full REZ, not a full tick: the body
+        // outweighs the world, and the receive buffer is sized by whichever is larger.
+        let largest_rez = frame_of(&sample_rez(REZ_MAX_VERTICES, REZ_MAX_TRIANGLES, REZ_MAX_MATERIALS));
+        let largest_tick = frame_of(&sample_tick_state(TICK_STATE_MAX_CREATURES));
+        assert_eq!(largest_rez.len().max(largest_tick.len()), max_frame_bytes());
+        assert!(largest_rez.len() > largest_tick.len(), "the premise: a full body outweighs a full tick");
         assert!(max_frame_bytes() <= FRAME_HEADER_BYTES + FRAME_PAYLOAD_LIMIT);
+    }
+
+    #[test]
+    fn a_rez_over_any_cap_is_refused_before_a_row_is_read() {
+        for (vertices, triangles, materials) in [(REZ_MAX_VERTICES + 1, 0, 0), (0, REZ_MAX_TRIANGLES + 1, 0), (0, 0, REZ_MAX_MATERIALS + 1)] {
+            // Encode side: the counts are judged before the rows are even compared.
+            let Message::Rez { header, .. } = sample_rez(0, 0, 0) else { unreachable!() };
+            let lying = Message::Rez {
+                header: Rez {
+                    vertex_count: vertices,
+                    triangle_count: triangles,
+                    material_count: materials,
+                    ..header
+                },
+                vertices: Vec::new(),
+                triangles: Vec::new(),
+                materials: Vec::new(),
+            };
+            let mut out = Vec::new();
+            assert_eq!(encode(&lying, &mut out), Err(EncodeError::RezCountOverCap { vertices, triangles, materials }));
+            assert!(out.is_empty(), "nothing is written before the refusal");
+
+            // Decode side: a header claiming the count, with a payload of exactly header size -
+            // the cap verdict comes before the length verdict, so the rows are never wanted.
+            let mut payload = frame_of(&sample_rez(0, 0, 0))[FRAME_HEADER_BYTES..].to_vec();
+            payload[20..24].copy_from_slice(&vertices.to_le_bytes());
+            payload[24..28].copy_from_slice(&triangles.to_le_bytes());
+            payload[28..32].copy_from_slice(&materials.to_le_bytes());
+            assert_eq!(
+                decode(MessageType::Rez as u8, &payload),
+                Err(DecodeError::RezCountOverCap { vertices, triangles, materials })
+            );
+        }
+    }
+
+    #[test]
+    fn a_rez_whose_counts_and_length_disagree_is_refused() {
+        let frame = frame_of(&sample_rez(4, 2, 1));
+        let payload = &frame[FRAME_HEADER_BYTES..];
+        // One byte short, one byte long: the exact sum is the law.
+        let short = &payload[..payload.len() - 1];
+        assert!(matches!(decode(MessageType::Rez as u8, short), Err(DecodeError::RezLengthMismatch { .. })));
+        let mut long = payload.to_vec();
+        long.push(0);
+        assert!(matches!(decode(MessageType::Rez as u8, &long), Err(DecodeError::RezLengthMismatch { .. })));
+        // Shorter than the header itself is refused at header time, by the rule.
+        assert!(matches!(
+            check_length(PayloadRule::Rez, REZ_HEADER_BYTES - 1),
+            Err(DecodeError::RezLengthMismatch { .. })
+        ));
+        assert!(matches!(
+            check_length(PayloadRule::Rez, max_rez_payload_bytes() + 1),
+            Err(DecodeError::RezLengthMismatch { .. })
+        ));
+        assert_eq!(check_length(PayloadRule::Rez, REZ_HEADER_BYTES), Ok(()));
+    }
+
+    #[test]
+    fn a_rez_triangle_pointing_past_its_vertices_or_materials_is_refused_both_ways() {
+        for (vertex, material) in [(4u32, 0u32), (0, 1), (u32::MAX, 0)] {
+            let Message::Rez {
+                header,
+                vertices,
+                mut triangles,
+                materials,
+            } = sample_rez(4, 2, 1)
+            else {
+                unreachable!()
+            };
+            triangles[1] = RezTriangle {
+                vertices: [0, 1, vertex],
+                material,
+            };
+            let lying = Message::Rez {
+                header,
+                vertices,
+                triangles,
+                materials,
+            };
+            let mut out = Vec::new();
+            assert_eq!(encode(&lying, &mut out), Err(EncodeError::RezIndexOutOfRange { triangle: 1 }));
+
+            // The same lie on the wire: patch the second triangle's bytes of an honest frame.
+            let mut frame = frame_of(&sample_rez(4, 2, 1));
+            let triangle_at = FRAME_HEADER_BYTES + REZ_HEADER_BYTES + 4 * size_of::<RezVertex>() + size_of::<RezTriangle>();
+            frame[triangle_at + 8..triangle_at + 12].copy_from_slice(&vertex.to_le_bytes());
+            frame[triangle_at + 12..triangle_at + 16].copy_from_slice(&material.to_le_bytes());
+            assert_eq!(
+                decode(MessageType::Rez as u8, &frame[FRAME_HEADER_BYTES..]),
+                Err(DecodeError::RezIndexOutOfRange { triangle: 1 })
+            );
+        }
+    }
+
+    #[test]
+    fn a_rez_carrying_a_nan_anywhere_is_refused_both_ways() {
+        // Offsets into the payload of every float a REZ carries, by family: a bound, a vertex
+        // coordinate, a material channel.
+        let vertex_at = REZ_HEADER_BYTES;
+        let material_at = REZ_HEADER_BYTES + 4 * size_of::<RezVertex>() + 2 * size_of::<RezTriangle>();
+        for offset in [4usize, vertex_at + 4, material_at + 12] {
+            for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let mut frame = frame_of(&sample_rez(4, 2, 1));
+                let at = FRAME_HEADER_BYTES + offset;
+                frame[at..at + 4].copy_from_slice(&poison.to_le_bytes());
+                assert_eq!(
+                    decode(MessageType::Rez as u8, &frame[FRAME_HEADER_BYTES..]),
+                    Err(DecodeError::RezNotFinite),
+                    "offset {offset} poisoned with {poison} was accepted"
+                );
+            }
+        }
+        let Message::Rez {
+            header,
+            mut vertices,
+            triangles,
+            materials,
+        } = sample_rez(4, 2, 1)
+        else {
+            unreachable!()
+        };
+        vertices[3].position[2] = f32::NAN;
+        let mut out = Vec::new();
+        assert_eq!(
+            encode(
+                &Message::Rez {
+                    header,
+                    vertices,
+                    triangles,
+                    materials
+                },
+                &mut out
+            ),
+            Err(EncodeError::RezNotFinite)
+        );
     }
 
     /// Bombardment: deterministic junk, every length up to a whole tick-state, every type byte
