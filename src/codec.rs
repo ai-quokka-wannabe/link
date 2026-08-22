@@ -170,6 +170,18 @@ pub enum PayloadRule {
 const PROPRIOCEPTION_HEADER_BYTES: usize = size_of::<Proprioception>();
 const CONTACT_BYTES: usize = size_of::<Contact>();
 
+/// A contact's thirteen floats in wire order: position, impulse, normal, depth, slip.
+fn contact_values(contact: &Contact) -> impl Iterator<Item = f32> + '_ {
+    contact
+        .position
+        .iter()
+        .chain(contact.impulse.iter())
+        .chain(contact.normal.iter())
+        .chain(std::iter::once(&contact.depth))
+        .chain(contact.slip.iter())
+        .copied()
+}
+
 const TICK_HEADER_BYTES: usize = size_of::<TickStateHeader>();
 const CREATURE_STATE_BYTES: usize = size_of::<CreatureState>();
 const REZ_HEADER_BYTES: usize = size_of::<Rez>();
@@ -429,7 +441,7 @@ fn decode_rez(payload: &[u8]) -> Result<Message, DecodeError> {
 
 fn decode_event(payload: &[u8]) -> Result<Message, DecodeError> {
     let kind = payload[28];
-    if kind != EventKind::Vocalisation as u8 {
+    if kind != EventKind::Vocalisation as u8 && kind != EventKind::Scratch as u8 {
         return Err(DecodeError::InvalidEventKind(kind));
     }
     if payload[29..32] != [0u8; 3] {
@@ -468,8 +480,11 @@ fn decode_proprioception(payload: &[u8]) -> Result<Message, DecodeError> {
         let contact = Contact {
             position: [read_f32(payload, at), read_f32(payload, at + 4), read_f32(payload, at + 8)],
             impulse: [read_f32(payload, at + 12), read_f32(payload, at + 16), read_f32(payload, at + 20)],
+            normal: [read_f32(payload, at + 24), read_f32(payload, at + 28), read_f32(payload, at + 32)],
+            depth: read_f32(payload, at + 36),
+            slip: [read_f32(payload, at + 40), read_f32(payload, at + 44), read_f32(payload, at + 48)],
         };
-        if contact.position.iter().chain(contact.impulse.iter()).any(|value| !value.is_finite()) {
+        if contact_values(&contact).any(|value| !value.is_finite()) {
             return Err(DecodeError::ProprioceptionNotFinite);
         }
         contacts.push(contact);
@@ -671,7 +686,7 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             out.extend_from_slice(&actions.reserved0);
         }
         Message::Event(event) => {
-            if event.kind != EventKind::Vocalisation as u8 {
+            if event.kind != EventKind::Vocalisation as u8 && event.kind != EventKind::Scratch as u8 {
                 return Err(EncodeError::InvalidEventKind(event.kind));
             }
             if event.reserved0 != [0; 3] {
@@ -703,11 +718,7 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             if header.reserved0 != [0; 3] {
                 return Err(EncodeError::ReservedNotZero);
             }
-            if header.specific_force.iter().any(|axis| !axis.is_finite())
-                || contacts
-                    .iter()
-                    .any(|contact| contact.position.iter().chain(contact.impulse.iter()).any(|value| !value.is_finite()))
-            {
+            if header.specific_force.iter().any(|axis| !axis.is_finite()) || contacts.iter().any(|contact| contact_values(contact).any(|value| !value.is_finite())) {
                 return Err(EncodeError::ProprioceptionNotFinite);
             }
             frame_header(out, MessageType::Proprioception, PROPRIOCEPTION_HEADER_BYTES + contacts.len() * CONTACT_BYTES);
@@ -720,7 +731,7 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             }
             out.extend_from_slice(&header.contact_count.to_le_bytes());
             for contact in contacts {
-                for value in contact.position.iter().chain(contact.impulse.iter()) {
+                for value in contact_values(contact) {
                     out.extend_from_slice(&value.to_le_bytes());
                 }
             }
@@ -840,6 +851,9 @@ mod tests {
                 .map(|index| Contact {
                     position: [index as f32, 0.05, -1.0],
                     impulse: [0.0, 0.3 + index as f32, 0.0],
+                    normal: [0.0, 1.0, 0.0],
+                    depth: 0.0,
+                    slip: [0.25, 0.0, 0.0],
                 })
                 .collect(),
         }
@@ -1007,6 +1021,11 @@ mod tests {
         let mut payload = event[FRAME_HEADER_BYTES..].to_vec();
         payload[28] = 0;
         assert_eq!(decode(MessageType::Event as u8, &payload), Err(DecodeError::InvalidEventKind(0)));
+        // The scratch is a kind; three is not yet.
+        payload[28] = EventKind::Scratch as u8;
+        assert!(matches!(decode(MessageType::Event as u8, &payload), Ok(Message::Event(scratch)) if scratch.kind == EventKind::Scratch as u8));
+        payload[28] = 3;
+        assert_eq!(decode(MessageType::Event as u8, &payload), Err(DecodeError::InvalidEventKind(3)));
 
         // Encode side: the same refusals, before a byte is written.
         let mut out = Vec::new();
@@ -1098,14 +1117,14 @@ mod tests {
     #[test]
     fn a_proprioception_is_judged_at_the_header_and_refused_by_name() {
         // Header-time: ragged, over the cap.
-        assert_eq!(check_length(PayloadRule::Proprioception, 32 + 24 * CONTACTS_MAX as usize), Ok(()));
+        assert_eq!(check_length(PayloadRule::Proprioception, 32 + 52 * CONTACTS_MAX as usize), Ok(()));
         assert!(matches!(check_length(PayloadRule::Proprioception, 31), Err(DecodeError::RaggedProprioception { .. })));
         assert!(matches!(
-            check_length(PayloadRule::Proprioception, 32 + 23),
+            check_length(PayloadRule::Proprioception, 32 + 51),
             Err(DecodeError::RaggedProprioception { .. })
         ));
         assert_eq!(
-            check_length(PayloadRule::Proprioception, 32 + 24 * (CONTACTS_MAX as usize + 1)),
+            check_length(PayloadRule::Proprioception, 32 + 52 * (CONTACTS_MAX as usize + 1)),
             Err(DecodeError::ContactsOverCap { count: CONTACTS_MAX + 1 })
         );
 
@@ -1125,7 +1144,7 @@ mod tests {
         let mut reserved = payload.to_vec();
         reserved[14] = 1;
         assert_eq!(decode(MessageType::Proprioception as u8, &reserved), Err(DecodeError::ReservedNotZero));
-        for offset in [16usize, 32 + 4, 32 + 24 + 20] {
+        for offset in [16usize, 32 + 4, 32 + 52 + 44] {
             let mut poisoned = payload.to_vec();
             poisoned[offset..offset + 4].copy_from_slice(&f32::NAN.to_le_bytes());
             assert_eq!(

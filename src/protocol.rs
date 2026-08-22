@@ -20,7 +20,7 @@ compile_error!("The Link protocol is little-endian on the wire; a big-endian hos
 /// `LNK_PROTOCOL_VERSION`: bumped whenever any declaration changes meaning or layout. The
 /// handshake carries the header's fingerprint rather than this number; the number exists for
 /// the human-readable refusal.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// `LNK_DEFAULT_PORT`: where Master Control listens when nobody names another port. A default
 /// and only a default. The number is the owner's: 30702, from JA-307020 — Tron's program
@@ -97,6 +97,8 @@ pub enum Role {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EventKind {
     Vocalisation = 1,
+    /// A body sliding along a face: footsteps, a scrape along a wall, a brush past another.
+    Scratch = 2,
 }
 
 /// `LnkWorldDefinition`: the shared simulation truth, gathered so it can be fingerprinted -
@@ -314,6 +316,12 @@ pub const CONTACTS_MAX: u32 = 16;
 pub struct Contact {
     pub position: [f32; 3],
     pub impulse: [f32; 3],
+    /// Unit, world frame: which way the face pushes.
+    pub normal: [f32; 3],
+    /// Metres past the face before the body was stood back; zero at rest.
+    pub depth: f32,
+    /// Metres per second along the face, body frame.
+    pub slip: [f32; 3],
 }
 
 /// PROPRIOCEPTION, server to the one host that owns the creature - a letter, not a broadcast.
@@ -398,7 +406,7 @@ const _: () = assert!(size_of::<TickStateHeader>() == 8 + 4 + 4 && size_of::<Tic
 const _: () = assert!(size_of::<Actions>() == 8 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 4 && size_of::<Actions>() == 40);
 const _: () = assert!(size_of::<Event>() == 8 + 12 + 4 + 4 + 1 + 3 && size_of::<Event>() == 32);
 const _: () = assert!(size_of::<Derez>() == 8 + 4 + 4 && size_of::<Derez>() == 16);
-const _: () = assert!(size_of::<Contact>() == 24);
+const _: () = assert!(size_of::<Contact>() == 52);
 const _: () = assert!(size_of::<Proprioception>() == 8 + 4 + 1 + 3 + 12 + 4 && size_of::<Proprioception>() == 32);
 const _: () = assert!(size_of::<Proprioception>() + CONTACTS_MAX as usize * size_of::<Contact>() <= FRAME_PAYLOAD_LIMIT);
 const _: () = assert!(size_of::<Ping>() == 8 && size_of::<Pong>() == 8);
@@ -457,7 +465,7 @@ mod tests {
         assert_eq!(Role::Spectator as u8, 1);
         assert_eq!(Role::CreatureHost as u8, 2);
         assert_eq!(EventKind::Vocalisation as u8, 1);
-        assert_eq!(PROTOCOL_VERSION, 5);
+        assert_eq!(PROTOCOL_VERSION, 6);
         assert_eq!(DEFAULT_PORT, 30_702);
     }
 

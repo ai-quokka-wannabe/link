@@ -49,7 +49,7 @@ extern "C"
     carries the header's fingerprint rather than this number, so two ends disagreeing about the
     bytes are refused even when they agree about the number; the number exists for the
     human-readable refusal. */
-#define LNK_PROTOCOL_VERSION 5u
+#define LNK_PROTOCOL_VERSION 6u
 
 /*! The port Master Control listens on when nobody names another - a default and only a
     default: the client's positional argument carries any host and port, and Master Control
@@ -133,6 +133,10 @@ extern "C"
 /*! Event kinds. Zero is invalid. Events are tick-stamped notifications and never load-bearing
     state: a client that misses one has missed a sound, not the world. */
 #define LNK_EVENT_VOCALISATION 1u
+/*! A body sliding along a face - the floor, a riser, another body - makes a sound: the scratch,
+    sounded from the contact point, its strength the slip against the normal impulse (the
+    exact-contacts ruling, TOPOLOGY.md § Master Control's mechanics). Footsteps are scratches. */
+#define LNK_EVENT_SCRATCH 2u
 
 /*!
     The shared simulation truth, gathered so it can be fingerprinted: the floor the physics
@@ -311,7 +315,7 @@ typedef struct LnkEvent {
     float position[3];      /*!< Where it happened, metres, world space. */
     float strength;         /*!< Kind-specific magnitude; for a vocalisation, the actuator value. */
     uint32_t creature_id;   /*!< Who caused it. */
-    uint8_t kind;           /*!< LNK_EVENT_VOCALISATION. Zero is invalid. */
+    uint8_t kind;           /*!< LNK_EVENT_VOCALISATION or LNK_EVENT_SCRATCH. Zero is invalid. */
     uint8_t reserved0[3];   /*!< Always zero. Named so the asserts can count it. */
 } LnkEvent;
 
@@ -319,14 +323,18 @@ typedef struct LnkEvent {
     max_contact_count, since the letter must be able to carry every contact the body feels. */
 #define LNK_CONTACTS_MAX 16u
 
-/*! One contact a body felt this tick: where on the body, and the impulse the world delivered
-    there - in the BODY frame, exactly as the Program ABI's TglContact hands it to a brain, so a
-    host copies the letter into the senses without a rotation of its own. The exact-contacts
-    etape grows this into a point on the body, a world normal, a depth and a slip velocity; today
-    it is what the ported physics produces. Twenty-four bytes. */
+/*! One contact a body felt this tick, in the BODY frame exactly as the Program ABI's TglContact
+    hands it to a brain, so a host copies the letter into the senses without a rotation of its
+    own: where on the body, the impulse the world delivered there, and - the exact-contacts
+    ruling - the face's normal (world frame, unit), how deep the body stood past the face before
+    it was stood back, and the slip: the body's velocity along the face, body frame, which is
+    what a scratch is made of. Fifty-two bytes. */
 typedef struct LnkContact {
     float position[3];  /*!< Metres, body frame. */
     float impulse[3];   /*!< Newton-seconds, body frame - the direction the body was pushed. */
+    float normal[3];    /*!< Unit, world frame - which way the face pushes. */
+    float depth;        /*!< Metres past the face before the body was stood back; zero at rest. */
+    float slip[3];      /*!< Metres per second along the face, body frame. */
 } LnkContact;
 
 /*! PROPRIOCEPTION, server to the one host that owns the creature - a letter, not a broadcast
@@ -451,9 +459,11 @@ LNK_STATIC_ASSERT(sizeof(LnkActions) == 40u,
                   "LnkActions must be 40 bytes: tick, id, TglActions' twelve, the previous tick's twelve resent, and a counted reserved word.");
 LNK_STATIC_ASSERT(sizeof(LnkEvent) == 32u, "LnkEvent must be 32 bytes: tick, place, strength, cause, kind.");
 LNK_STATIC_ASSERT(sizeof(LnkDerez) == 16u, "LnkDerez must be 16 bytes: tick, id, reserved.");
-LNK_STATIC_ASSERT(sizeof(LnkContact) == 24u, "LnkContact must be 24 bytes: position, impulse.");
+LNK_STATIC_ASSERT(sizeof(LnkContact) == 52u, "LnkContact must be 52 bytes: position, impulse, normal, depth, slip.");
 LNK_STATIC_ASSERT(sizeof(LnkProprioception) == 32u, "LnkProprioception must be 32 bytes: tick, id, grounded, reserved, force, count.");
-LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkContact, position) + LNK_MEMBER_BYTES(LnkContact, impulse) == sizeof(LnkContact),
+LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkContact, position) + LNK_MEMBER_BYTES(LnkContact, impulse) + LNK_MEMBER_BYTES(LnkContact, normal)
+                          + LNK_MEMBER_BYTES(LnkContact, depth) + LNK_MEMBER_BYTES(LnkContact, slip)
+                      == sizeof(LnkContact),
                   "LnkContact has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkProprioception, tick) + LNK_MEMBER_BYTES(LnkProprioception, creature_id) + LNK_MEMBER_BYTES(LnkProprioception, grounded)
                           + LNK_MEMBER_BYTES(LnkProprioception, reserved0) + LNK_MEMBER_BYTES(LnkProprioception, specific_force)

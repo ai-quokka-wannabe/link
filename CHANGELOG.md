@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Protocol version 6: the contact knows its face, and a slide makes a sound.** `LnkContact`
+  grows what the exact-contacts ruling named: the face's unit normal (world frame), the depth
+  the body stood past it, and the slip - the body's velocity along the face, body frame -
+  fifty-two bytes, thirteen floats all judged finite both ways. `LNK_EVENT_SCRATCH` (2) is the
+  new event kind: a body sliding along a face - the floor, a riser, another body - sounds from
+  the contact point, its strength the slip against the normal impulse; footsteps are scratches.
+  The message shapes and the ABI are otherwise unchanged (ABI stays 6); versions 1 to 5 are
+  refused as history.
 - **A Disk: a client whose socket is a file (ABI v6).** The state log the topology owes is not a
   second encoder. `record_open` opens a recording - a server-held end with no peer; every
   `send_*` stages a frame, `flush` writes them all, `poll` hears nothing, `close` writes `BYE` -
