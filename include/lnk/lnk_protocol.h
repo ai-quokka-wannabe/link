@@ -319,12 +319,14 @@ typedef struct LnkEvent {
     max_contact_count, since the letter must be able to carry every contact the body feels. */
 #define LNK_CONTACTS_MAX 16u
 
-/*! One contact a body felt this tick: where, and the impulse the world delivered there. The
-    exact-contacts etape grows this into a point on the body, a world normal, a depth and a slip
-    velocity; today it is what the ported physics produces. Twenty-four bytes. */
+/*! One contact a body felt this tick: where on the body, and the impulse the world delivered
+    there - in the BODY frame, exactly as the Program ABI's TglContact hands it to a brain, so a
+    host copies the letter into the senses without a rotation of its own. The exact-contacts
+    etape grows this into a point on the body, a world normal, a depth and a slip velocity; today
+    it is what the ported physics produces. Twenty-four bytes. */
 typedef struct LnkContact {
-    float position[3];  /*!< Metres, world space. */
-    float impulse[3];   /*!< Newton-seconds, world space. */
+    float position[3];  /*!< Metres, body frame. */
+    float impulse[3];   /*!< Newton-seconds, body frame - the direction the body was pushed. */
 } LnkContact;
 
 /*! PROPRIOCEPTION, server to the one host that owns the creature - a letter, not a broadcast
@@ -340,7 +342,7 @@ typedef struct LnkProprioception {
     uint32_t creature_id;
     uint8_t grounded;           /*!< 1 when the feet touch the ground this tick, else 0. */
     uint8_t reserved0[3];       /*!< Always zero. Named so the asserts can count it. */
-    float specific_force[3];    /*!< Metres per second squared, world space - what an otolith reads. */
+    float specific_force[3];    /*!< Metres per second squared, BODY frame - what an otolith reads; {0, +9.81, 0} at rest. */
     uint32_t contact_count;     /*!< Rows that follow, at most LNK_CONTACTS_MAX. */
 } LnkProprioception;
 
