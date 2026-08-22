@@ -1690,10 +1690,16 @@ mod tests {
             Contact {
                 position: [1.0, 0.0, 5.0],
                 impulse: [0.0, 0.3, 0.0],
+                normal: [0.0, 1.0, 0.0],
+                depth: 0.0,
+                slip: [0.0; 3],
             },
             Contact {
                 position: [1.1, 0.0, 5.0],
                 impulse: [0.0, 0.4, 0.0],
+                normal: [0.0, 1.0, 0.0],
+                depth: 0.0,
+                slip: [0.0; 3],
             },
         ];
         let letter = Proprioception {
