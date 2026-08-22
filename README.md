@@ -57,18 +57,20 @@ platforms, so it cannot rot: it is the build, not a side check.
 
 ## Where It Stands
 
-The contract is pinned: `include/lnk/lnk_protocol.h` carries the framing, nine of the ten
-messages as no-padding PODs, and the fingerprint the handshake refuses mismatches with —
+The contract is pinned at protocol version 6: `include/lnk/lnk_protocol.h` carries the framing,
+all eleven messages as no-padding PODs, and the fingerprint the handshake refuses mismatches with —
 mirrored field for field and size-asserted again in `src/protocol.rs`, guarded in CI by
 `tools/check_protocol_version.py`. The codec turns frames into messages by refusal, and the
 transport carries them over TCP — a mismatched contract is refused at the handshake in words a
 human can read. The built library exports one symbol, `lnkGetClientVTable`
 (`include/lnk/lnk_client.h`), behind which both ends of the wire live — the connecting client
 and the listening server, localhost-only while the trust stance holds; no panic ever crosses
-it, and the default port is 30702, Tron's own designation guarding the doorway.
-REZ's payload layout is deliberately still open: it flattens
-the flagship's creature descriptor and is designed against that validator, not guessed here. The
-roadmap lives in [TODO.md](TODO.md), the history in [CHANGELOG.md](CHANGELOG.md).
+it, and the default port is 30702, Tron's own designation guarding the doorway. Every message
+flows one way only, and an end speaking the other's words is hung up on. Beside the wire, the
+Disk: a recorder whose socket is a file and a replayer that reads it back through the same
+table, so a world's life is replayed by the very code that heard it. The consumers are
+Master Control (the server half) and TronGrid Lite (both client roles). The roadmap lives in
+[TODO.md](TODO.md), the history in [CHANGELOG.md](CHANGELOG.md).
 
 ## Licence
 

@@ -7,15 +7,15 @@ changes go there first.
 
 ## Etape 1 — the wire contract
 
-**Done, except the one message that needs a consumer to design against.**
-`include/lnk/lnk_protocol.h` pins the framing (`u16 length | u8 type`, an exact-size rule for
-fixed messages, caps checked before any copy), nine of the ten messages as no-padding PODs with
+**Done.** `include/lnk/lnk_protocol.h` pins the framing (`u16 length | u8 type`, an
+exact-size rule for fixed messages, caps checked before any copy), all eleven messages as
+no-padding PODs (REZ and PROPRIOCEPTION joined later, at v4 and v5) with
 sum-of-members asserts, and `LNK_PROTOCOL_VERSION` guarded by `tools/check_protocol_version.py`
 in CI — the flagship's ABI discipline, wholesale. `src/protocol.rs` mirrors every struct and
 pins the same sizes, so the two languages cannot drift without one refusing to build. Broken
 deliberately once each, all discriminating: the Rust size pin, the unbumped-header refusal, the
-same-version update refusal and the stale-fingerprint refusal. REZ's number is reserved and its
-payload is Etape 6 below.
+same-version update refusal and the stale-fingerprint refusal. REZ's payload was Etape 6 below,
+since landed.
 
 ## Etape 2 — the codec
 
@@ -44,7 +44,7 @@ fingerprint comparison, a dropped partial-write carry, a forgotten partial heade
 
 ## Etape 4 — the C ABI surface
 
-**Done, for the client half.** `include/lnk/lnk_client.h` declares the surface and `src/abi.rs`
+**Done, both halves; ABI version 6 today.** `include/lnk/lnk_client.h` declares the surface and `src/abi.rs`
 implements it: one exported symbol, `lnkGetClientVTable`, returning NULL for any version but its
 own — the flagship's `tglGetProgramVTable` refusal, reproduced — with `vtable_bytes` and
 `abi_version` as the table's first members. Behind it: connect (the whole handshake, refusals
@@ -67,19 +67,22 @@ anger.
 
 ## Etape 5 — the first consumer
 
-tron-grid-lite consumes the built library and header. The seam extractions on its side are its
-own TODO's business; the wire only has to be worth consuming. This is also the etape where the C
-header is first compiled by a C++ toolchain, which is when its static asserts first actually
-run — until then the Rust mirrors carry the layout claims alone, which is a known, deliberate
-gap.
+**Done.** tron-grid-lite consumes the built library and header (its `--window` and `--program`
+roles both dial through it), and so does Master Control, as the server half; the C header is
+compiled by three C++ toolchains in the flagship's CI, where its static asserts run for real.
 
 ## Etape 6 — the REZ payload layout
 
-The one message the contract still owes. REZ carries a creature's identity, descriptor and
+**Done (protocol v4).** REZ carries the creature's identity, its bounds and its render model as
+counted, capped, no-padding sections - vertices, triangles and materials - validated whole at
+decode: counts under their caps before any copy, every index inside its array, every float
+finite. The creature descriptor's eyes and ears stay the host's business, because only the host
+renders them. The reasoning that shaped it:
+
+REZ carries a creature's identity, descriptor and
 render model, and the descriptor is the flagship's `TglCreatureDesc` — which carries pointers:
 per-eye sample-direction and acceptance arrays, per-ear band edges. Flattening that into
 counted, capped, no-padding wire sections is real design, and it is designed against the
 flagship's validator as its first consumer rather than guessed here: the descriptor validation
 and `copyValidatedModel` already state what a well-formed creature is, and the wire layout must
-be exactly what they accept, or the refusal happens at the wrong end of the wire. Until it
-lands, an end that receives REZ refuses it as unknown, which is honest.
+be exactly what they accept, or the refusal happens at the wrong end of the wire.
