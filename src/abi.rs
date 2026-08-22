@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use crate::codec::Message;
 use crate::protocol::{
-    Actions, CreatureState, Derez, Event, Hello, MessageType, PROTOCOL_VERSION, Ping, Pong, REZ_MAX_MATERIALS, REZ_MAX_TRIANGLES, REZ_MAX_VERTICES, Rez,
-    RezMaterial, RezTriangle, RezVertex, Role, TickStateHeader, Welcome, WorldDefinition, world_fingerprint,
+    Actions, CreatureState, Derez, Event, Hello, MessageType, PROTOCOL_VERSION, Ping, Pong, REZ_MAX_MATERIALS, REZ_MAX_TRIANGLES, REZ_MAX_VERTICES, Rez, RezMaterial,
+    RezTriangle, RezVertex, Role, TickStateHeader, Welcome, WorldDefinition, world_fingerprint,
 };
 use crate::transport::{Connection, Listener, TransportError, connect, listen, local_hello, recorded_fingerprint};
 
@@ -76,6 +76,17 @@ pub struct TickStateView {
     pub states: *const CreatureState,
 }
 
+/// `LnkRezView`: the header by value, the three row arrays by borrow from the client's rez
+/// rows - valid until the next poll or close, exactly like the tick's.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RezView {
+    pub rez: Rez,
+    pub vertices: *const RezVertex,
+    pub triangles: *const RezTriangle,
+    pub materials: *const RezMaterial,
+}
+
 /// The union behind `LnkMessageView.as`. Every member is plain old data; reading the member the
 /// `type` byte names is the C side's contract, mirrored in the tests here.
 #[repr(C)]
@@ -89,6 +100,7 @@ pub union MessageViewPayload {
     pub pong: Pong,
     pub hello: Hello,
     pub actions: Actions,
+    pub rez: RezView,
 }
 
 /// `LnkMessageView`, field for field.
@@ -107,9 +119,11 @@ pub struct LnkClientVTable {
     pub abi_version: u32,
     pub protocol_version: extern "C" fn() -> u32,
     pub protocol_fingerprint: extern "C" fn(out_fingerprint: *mut u8),
+    pub world_fingerprint: extern "C" fn(definition: *const WorldDefinition) -> u64,
     pub connect: extern "C" fn(
         address_utf8: *const c_char,
         role: u8,
+        world_fingerprint: u64,
         timeout_milliseconds: u32,
         out_welcome: *mut Welcome,
         out_status: *mut LnkStatus,
@@ -118,11 +132,13 @@ pub struct LnkClientVTable {
     ) -> *mut LnkClient,
     pub poll: extern "C" fn(client: *mut LnkClient, out_message: *mut MessageView) -> LnkStatus,
     pub send_actions: extern "C" fn(client: *mut LnkClient, actions: *const Actions) -> LnkStatus,
+    pub send_rez:
+        extern "C" fn(client: *mut LnkClient, rez: *const Rez, vertices: *const RezVertex, triangles: *const RezTriangle, materials: *const RezMaterial) -> LnkStatus,
     pub send_ping: extern "C" fn(client: *mut LnkClient, nonce: u64) -> LnkStatus,
     pub send_pong: extern "C" fn(client: *mut LnkClient, nonce: u64) -> LnkStatus,
     pub flush: extern "C" fn(client: *mut LnkClient, out_everything_left: *mut u8) -> LnkStatus,
     pub close: extern "C" fn(client: *mut LnkClient),
-    pub listen: extern "C" fn(port: u16, out_status: *mut LnkStatus, out_detail_utf8: *mut c_char, detail_capacity_bytes: u32) -> *mut LnkServer,
+    pub listen: extern "C" fn(port: u16, world_fingerprint: u64, out_status: *mut LnkStatus, out_detail_utf8: *mut c_char, detail_capacity_bytes: u32) -> *mut LnkServer,
     pub server_port: extern "C" fn(server: *mut LnkServer) -> u16,
     pub accept: extern "C" fn(
         server: *mut LnkServer,
@@ -144,9 +160,11 @@ static VTABLE: LnkClientVTable = LnkClientVTable {
     abi_version: LNK_CLIENT_ABI_VERSION,
     protocol_version: protocol_version_impl,
     protocol_fingerprint: protocol_fingerprint_impl,
+    world_fingerprint: world_fingerprint_impl,
     connect: connect_impl,
     poll: poll_impl,
     send_actions: send_actions_impl,
+    send_rez: send_rez_impl,
     send_ping: send_ping_impl,
     send_pong: send_pong_impl,
     flush: flush_impl,
@@ -241,9 +259,22 @@ extern "C" fn protocol_fingerprint_impl(out_fingerprint: *mut u8) {
     });
 }
 
+extern "C" fn world_fingerprint_impl(definition: *const WorldDefinition) -> u64 {
+    guarded(0, || {
+        if definition.is_null() {
+            // No definition, no world: zero is the fingerprint of nothing - the honest answer
+            // to a null on a function without a status channel.
+            return 0;
+        }
+        // SAFETY: non-null was just checked; WorldDefinition is plain old data, read by copy.
+        world_fingerprint(&unsafe { *definition })
+    })
+}
+
 extern "C" fn connect_impl(
     address_utf8: *const c_char,
     role: u8,
+    world_fingerprint: u64,
     timeout_milliseconds: u32,
     out_welcome: *mut Welcome,
     out_status: *mut LnkStatus,
@@ -280,7 +311,7 @@ extern "C" fn connect_impl(
             _ => return refuse(LNK_BAD_ARGUMENT, "link: role must be spectator (1) or creature host (2)"),
         };
 
-        match connect(address, &local_hello(role), Duration::from_millis(u64::from(timeout_milliseconds))) {
+        match connect(address, &local_hello(role, world_fingerprint), Duration::from_millis(u64::from(timeout_milliseconds))) {
             Ok((connection, welcome)) => {
                 // SAFETY: out_welcome was checked non-null; Welcome is plain old data.
                 unsafe {
@@ -290,6 +321,9 @@ extern "C" fn connect_impl(
                 Box::into_raw(Box::new(ClientInner {
                     connection,
                     tick_rows: Vec::new(),
+                    rez_vertices: Vec::new(),
+                    rez_triangles: Vec::new(),
+                    rez_materials: Vec::new(),
                 }))
                 .cast::<LnkClient>()
             }
@@ -339,6 +373,27 @@ extern "C" fn poll_impl(client: *mut LnkClient, out_message: *mut MessageView) -
                 )
             }
             Message::Actions(actions) => (MessageType::Actions, MessageViewPayload { actions }),
+            Message::Rez {
+                header,
+                vertices,
+                triangles,
+                materials,
+            } => {
+                inner.rez_vertices = vertices;
+                inner.rez_triangles = triangles;
+                inner.rez_materials = materials;
+                (
+                    MessageType::Rez,
+                    MessageViewPayload {
+                        rez: RezView {
+                            rez: header,
+                            vertices: inner.rez_vertices.as_ptr(),
+                            triangles: inner.rez_triangles.as_ptr(),
+                            materials: inner.rez_materials.as_ptr(),
+                        },
+                    },
+                )
+            }
             Message::Event(event) => (MessageType::Event, MessageViewPayload { event }),
             Message::Derez(derez) => (MessageType::Derez, MessageViewPayload { derez }),
             Message::Ping(ping) => (MessageType::Ping, MessageViewPayload { ping }),
@@ -375,7 +430,7 @@ extern "C" fn send_actions_impl(client: *mut LnkClient, actions: *const Actions)
         }
         // SAFETY: non-null was just checked; validity is the header's stated contract.
         let inner = unsafe { inner_of(client) };
-        if !inner.connection.may_send_actions() {
+        if !inner.connection.may_send_intents() {
             // A spectator never sends ACTIONS, and the refusal starts at the sending half so an
             // honest client cannot even stage the violation the server end would hang up on.
             return LNK_BAD_ARGUMENT;
@@ -383,6 +438,61 @@ extern "C" fn send_actions_impl(client: *mut LnkClient, actions: *const Actions)
         // SAFETY: non-null was just checked; Actions is plain old data, read by copy.
         let actions = unsafe { *actions };
         match inner.connection.queue(&Message::Actions(actions)) {
+            Ok(()) => LNK_OK,
+            Err(_) => LNK_BAD_ARGUMENT,
+        }
+    })
+}
+
+extern "C" fn send_rez_impl(
+    client: *mut LnkClient,
+    rez: *const Rez,
+    vertices: *const RezVertex,
+    triangles: *const RezTriangle,
+    materials: *const RezMaterial,
+) -> LnkStatus {
+    guarded(LNK_PANIC, || {
+        if rez.is_null() || client.is_null() {
+            return LNK_BAD_ARGUMENT;
+        }
+        // SAFETY: non-null was just checked; validity is the header's stated contract.
+        let inner = unsafe { inner_of(client) };
+        if !inner.connection.may_send_intents() {
+            // A spectator never sends REZ either: the same refusal, at the same sending half.
+            return LNK_BAD_ARGUMENT;
+        }
+        // SAFETY: non-null was just checked; Rez is plain old data, read by copy.
+        let header = unsafe { *rez };
+
+        // Every count is judged against its cap before a single row is read - the wire's
+        // validate-before-copy rule applied to our own caller, so a lying count can never make
+        // this library read past the arrays it was handed.
+        if header.vertex_count > REZ_MAX_VERTICES || header.triangle_count > REZ_MAX_TRIANGLES || header.material_count > REZ_MAX_MATERIALS {
+            return LNK_BAD_ARGUMENT;
+        }
+        if (header.vertex_count > 0 && vertices.is_null()) || (header.triangle_count > 0 && triangles.is_null()) || (header.material_count > 0 && materials.is_null()) {
+            return LNK_BAD_ARGUMENT;
+        }
+        /// Rows by copy, or none: a zero count never touches the pointer, so a bodiless REZ
+        /// may pass NULL for every array.
+        fn rows<T: Copy>(pointer: *const T, count: u32) -> Vec<T> {
+            if count == 0 {
+                Vec::new()
+            } else {
+                // SAFETY: the pointer is non-null (checked by the caller) and the caller
+                // promised `count` rows; the count was capped above.
+                unsafe { std::slice::from_raw_parts(pointer, count as usize) }.to_vec()
+            }
+        }
+        let message = Message::Rez {
+            header,
+            vertices: rows(vertices, header.vertex_count),
+            triangles: rows(triangles, header.triangle_count),
+            materials: rows(materials, header.material_count),
+        };
+        // The codec judges the rest - indices in range, floats finite - and a refusal there is
+        // the caller's bad argument, not a wire failure.
+        match inner.connection.queue(&message) {
             Ok(()) => LNK_OK,
             Err(_) => LNK_BAD_ARGUMENT,
         }
@@ -415,7 +525,7 @@ extern "C" fn flush_impl(client: *mut LnkClient, out_everything_left: *mut u8) -
     })
 }
 
-extern "C" fn listen_impl(port: u16, out_status: *mut LnkStatus, out_detail_utf8: *mut c_char, detail_capacity_bytes: u32) -> *mut LnkServer {
+extern "C" fn listen_impl(port: u16, world_fingerprint: u64, out_status: *mut LnkStatus, out_detail_utf8: *mut c_char, detail_capacity_bytes: u32) -> *mut LnkServer {
     guarded(std::ptr::null_mut(), || {
         if out_status.is_null() {
             return std::ptr::null_mut();
@@ -428,7 +538,7 @@ extern "C" fn listen_impl(port: u16, out_status: *mut LnkStatus, out_detail_utf8
             Ok(listener) => {
                 // SAFETY: as above.
                 unsafe { *out_status = LNK_OK };
-                Box::into_raw(Box::new(ServerInner { listener })).cast::<LnkServer>()
+                Box::into_raw(Box::new(ServerInner { listener, world_fingerprint })).cast::<LnkServer>()
             }
             Err(error) => {
                 // SAFETY: as above.
@@ -500,7 +610,7 @@ extern "C" fn accept_impl(
             Err(error) => return refuse(status_of(&error), &detail_of(&error)),
         };
 
-        match crate::transport::accept(stream, Duration::from_millis(u64::from(timeout_milliseconds))) {
+        match crate::transport::accept(stream, Duration::from_millis(u64::from(timeout_milliseconds)), inner.world_fingerprint) {
             Ok((connection, hello)) => {
                 // SAFETY: out_hello was checked non-null; Hello is plain old data.
                 unsafe {
@@ -510,6 +620,9 @@ extern "C" fn accept_impl(
                 Box::into_raw(Box::new(ClientInner {
                     connection,
                     tick_rows: Vec::new(),
+                    rez_vertices: Vec::new(),
+                    rez_triangles: Vec::new(),
+                    rez_materials: Vec::new(),
                 }))
                 .cast::<LnkClient>()
             }
@@ -612,6 +725,9 @@ mod tests {
     use std::net::TcpListener;
 
     const PATIENCE: Duration = Duration::from_secs(5);
+    /// The one world every test here lives in - a fingerprint, not a definition, because the
+    /// transport only ever compares the number.
+    const WORLD: u64 = 0x5EED_0F7E_601D;
 
     fn vtable() -> &'static LnkClientVTable {
         let table = lnkGetClientVTable(LNK_CLIENT_ABI_VERSION);
@@ -639,6 +755,10 @@ mod tests {
         let mut view = unsafe { std::mem::zeroed::<MessageView>() };
         assert_eq!((table.poll)(std::ptr::null_mut(), &raw mut view), LNK_BAD_ARGUMENT);
         assert_eq!((table.send_actions)(std::ptr::null_mut(), std::ptr::null()), LNK_BAD_ARGUMENT);
+        assert_eq!(
+            (table.send_rez)(std::ptr::null_mut(), std::ptr::null(), std::ptr::null(), std::ptr::null(), std::ptr::null()),
+            LNK_BAD_ARGUMENT
+        );
         assert_eq!((table.send_ping)(std::ptr::null_mut(), 1), LNK_BAD_ARGUMENT);
         let mut left = 0u8;
         assert_eq!((table.flush)(std::ptr::null_mut(), &raw mut left), LNK_BAD_ARGUMENT);
@@ -646,12 +766,12 @@ mod tests {
 
         let mut welcome = unsafe { std::mem::zeroed::<Welcome>() };
         let mut status: LnkStatus = -1;
-        let client = (table.connect)(std::ptr::null(), 2, 100, &raw mut welcome, &raw mut status, std::ptr::null_mut(), 0);
+        let client = (table.connect)(std::ptr::null(), 2, WORLD, 100, &raw mut welcome, &raw mut status, std::ptr::null_mut(), 0);
         assert!(client.is_null());
         assert_eq!(status, LNK_BAD_ARGUMENT);
 
         let address = CString::new("127.0.0.1:1").expect("address literal");
-        let client = (table.connect)(address.as_ptr(), 7, 100, &raw mut welcome, &raw mut status, std::ptr::null_mut(), 0);
+        let client = (table.connect)(address.as_ptr(), 7, WORLD, 100, &raw mut welcome, &raw mut status, std::ptr::null_mut(), 0);
         assert!(client.is_null());
         assert_eq!(status, LNK_BAD_ARGUMENT, "a role that is not a role is refused before any socket");
     }
@@ -663,7 +783,7 @@ mod tests {
 
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept");
-            let (mut connection, hello) = accept(stream, PATIENCE).expect("handshake");
+            let (mut connection, hello) = accept(stream, PATIENCE, WORLD).expect("handshake");
             assert_eq!(hello.role, Role::CreatureHost as u8);
 
             connection
@@ -671,6 +791,7 @@ mod tests {
                     current_tick: 100,
                     nominal_dt_seconds: 0.03125,
                     client_id: 9,
+                    world_fingerprint: WORLD,
                 }))
                 .expect("queue WELCOME");
             let rows = vec![
@@ -736,6 +857,7 @@ mod tests {
         let client = (table.connect)(
             address.as_ptr(),
             Role::CreatureHost as u8,
+            WORLD,
             5_000,
             &raw mut welcome,
             &raw mut status,
@@ -815,7 +937,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             use std::io::{Read, Write};
             let (mut stream, _) = listener.accept().expect("accept");
-            let mut opening = [0u8; 4 + 3 + 40];
+            let mut opening = [0u8; 4 + 3 + 48];
             stream.read_exact(&mut opening).expect("magic and HELLO");
             stream.write_all(b"link: no vacancy tonight\n").expect("refusal");
         });
@@ -828,6 +950,7 @@ mod tests {
         let client = (table.connect)(
             address.as_ptr(),
             Role::Spectator as u8,
+            WORLD,
             5_000,
             &raw mut welcome,
             &raw mut status,
@@ -843,15 +966,19 @@ mod tests {
 
     #[test]
     fn old_versions_are_history() {
-        assert!(lnkGetClientVTable(1).is_null(), "ABI 1 must be refused now that 3 exists");
-        assert!(lnkGetClientVTable(2).is_null(), "ABI 2 must be refused now that 3 exists");
+        for old in 1..LNK_CLIENT_ABI_VERSION {
+            assert!(
+                lnkGetClientVTable(old).is_null(),
+                "ABI {old} must be refused now that {LNK_CLIENT_ABI_VERSION} exists"
+            );
+        }
     }
 
     #[test]
     fn a_spectator_cannot_stage_actions_and_a_creature_host_can() {
         let table = vtable();
         let mut status: LnkStatus = -1;
-        let server = (table.listen)(0, &raw mut status, std::ptr::null_mut(), 0);
+        let server = (table.listen)(0, WORLD, &raw mut status, std::ptr::null_mut(), 0);
         assert_eq!(status, LNK_OK);
         let port = (table.server_port)(server);
 
@@ -861,7 +988,7 @@ mod tests {
                 let address = CString::new(format!("127.0.0.1:{port}")).expect("address");
                 let mut welcome = unsafe { std::mem::zeroed::<Welcome>() };
                 let mut status: LnkStatus = -1;
-                let client = (table.connect)(address.as_ptr(), role as u8, 5_000, &raw mut welcome, &raw mut status, std::ptr::null_mut(), 0);
+                let client = (table.connect)(address.as_ptr(), role as u8, WORLD, 5_000, &raw mut welcome, &raw mut status, std::ptr::null_mut(), 0);
                 assert_eq!(status, LNK_OK);
 
                 let actions = Actions {
@@ -876,6 +1003,9 @@ mod tests {
                     reserved0: [0; 4],
                 };
                 let verdict = (table.send_actions)(client, &raw const actions);
+                let rez = bodiless_rez(1);
+                let rez_verdict = (table.send_rez)(client, &raw const rez, std::ptr::null(), std::ptr::null(), std::ptr::null());
+                assert_eq!(rez_verdict, verdict, "REZ and ACTIONS share one role rule at the sending half");
                 (table.close)(client);
                 verdict
             });
@@ -898,6 +1028,7 @@ mod tests {
                 current_tick: 1,
                 nominal_dt_seconds: 0.031_25,
                 client_id: 1,
+                world_fingerprint: WORLD,
             };
             assert_eq!((table.send_welcome)(connection, &raw const welcome), LNK_OK);
             let mut everything_left = 0u8;
@@ -914,7 +1045,7 @@ mod tests {
     fn the_server_half_carries_a_whole_world_tick() {
         let table = vtable();
         let mut status: LnkStatus = -1;
-        let server = (table.listen)(0, &raw mut status, std::ptr::null_mut(), 0);
+        let server = (table.listen)(0, WORLD, &raw mut status, std::ptr::null_mut(), 0);
         assert_eq!(status, LNK_OK);
         assert!(!server.is_null());
         let port = (table.server_port)(server);
@@ -934,6 +1065,7 @@ mod tests {
             let client = (table.connect)(
                 address.as_ptr(),
                 Role::Spectator as u8,
+                WORLD,
                 5_000,
                 &raw mut welcome,
                 &raw mut status,
@@ -992,6 +1124,7 @@ mod tests {
             current_tick: 900,
             nominal_dt_seconds: 0.031_25,
             client_id: 4,
+            world_fingerprint: WORLD,
         };
         assert_eq!((table.send_welcome)(connection, &raw const welcome), LNK_OK);
         let rows = [
@@ -1042,6 +1175,330 @@ mod tests {
         (table.close_server)(server);
     }
 
+    fn bodiless_rez(creature_id: u32) -> Rez {
+        Rez {
+            creature_id,
+            max_forward_speed: 1.0,
+            max_turn_rate: 1.5,
+            max_vocalisation_strength: 1.0,
+            max_contact_count: 4,
+            vertex_count: 0,
+            triangle_count: 0,
+            material_count: 0,
+        }
+    }
+
+    #[test]
+    fn the_world_fingerprint_is_answered_through_the_table_and_a_null_is_nothing() {
+        let table = vtable();
+        let definition = WorldDefinition {
+            floor_cells: 64,
+            floor_cell_size: 2.0,
+            floor_height: 0.0,
+            relief_amplitude: 5.0,
+            relief_wavelength: 46.0,
+            relief_octaves: 3,
+            relief_terraces: 6,
+            relief_seed: 42,
+            dt_seconds: 0.031_25,
+            body_half_height: 0.5,
+        };
+        assert_eq!((table.world_fingerprint)(&raw const definition), world_fingerprint(&definition));
+        assert_ne!((table.world_fingerprint)(&raw const definition), 0);
+        assert_eq!((table.world_fingerprint)(std::ptr::null()), 0);
+    }
+
+    #[test]
+    fn a_lying_rez_count_is_refused_before_a_single_row_is_read() {
+        let table = vtable();
+        let mut status: LnkStatus = -1;
+        let server = (table.listen)(0, WORLD, &raw mut status, std::ptr::null_mut(), 0);
+        let port = (table.server_port)(server);
+        let client_thread = std::thread::spawn(move || {
+            let table = vtable();
+            let address = CString::new(format!("127.0.0.1:{port}")).expect("address");
+            let mut welcome = unsafe { std::mem::zeroed::<Welcome>() };
+            let mut status: LnkStatus = -1;
+            let client = (table.connect)(
+                address.as_ptr(),
+                Role::CreatureHost as u8,
+                WORLD,
+                5_000,
+                &raw mut welcome,
+                &raw mut status,
+                std::ptr::null_mut(),
+                0,
+            );
+            assert_eq!(status, LNK_OK);
+
+            let one_vertex = [RezVertex { position: [0.0; 3] }];
+            for (vertices, triangles, materials) in [(REZ_MAX_VERTICES + 1, 0, 0), (0, REZ_MAX_TRIANGLES + 1, 0), (0, 0, REZ_MAX_MATERIALS + 1)] {
+                let mut rez = bodiless_rez(1);
+                rez.vertex_count = vertices;
+                rez.triangle_count = triangles;
+                rez.material_count = materials;
+                assert_eq!(
+                    (table.send_rez)(client, &raw const rez, one_vertex.as_ptr(), std::ptr::null(), std::ptr::null()),
+                    LNK_BAD_ARGUMENT,
+                    "a count over the cap is refused before a row is read"
+                );
+            }
+            let mut rez = bodiless_rez(1);
+            rez.vertex_count = 1;
+            assert_eq!(
+                (table.send_rez)(client, &raw const rez, std::ptr::null(), std::ptr::null(), std::ptr::null()),
+                LNK_BAD_ARGUMENT,
+                "a count with no rows behind it is refused before any read"
+            );
+            // An index past the vertices is the codec's refusal, surfaced as the caller's bad argument.
+            let mut rez = bodiless_rez(1);
+            rez.vertex_count = 1;
+            rez.triangle_count = 1;
+            rez.material_count = 1;
+            let lying_triangle = [RezTriangle {
+                vertices: [0, 0, 1],
+                material: 0,
+            }];
+            let material = [RezMaterial {
+                colour: [1.0; 3],
+                index_of_refraction: 1.0,
+                emission: [0.0; 3],
+                transmission: 0.0,
+            }];
+            assert_eq!(
+                (table.send_rez)(client, &raw const rez, one_vertex.as_ptr(), lying_triangle.as_ptr(), material.as_ptr()),
+                LNK_BAD_ARGUMENT
+            );
+            assert_eq!(
+                (table.send_rez)(client, std::ptr::null(), std::ptr::null(), std::ptr::null(), std::ptr::null()),
+                LNK_BAD_ARGUMENT
+            );
+            (table.close)(client);
+        });
+
+        let mut hello = unsafe { std::mem::zeroed::<Hello>() };
+        let connection = loop {
+            let knock = (table.accept)(server, 5_000, &raw mut hello, &raw mut status, std::ptr::null_mut(), 0);
+            if !knock.is_null() {
+                break knock;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let welcome = Welcome {
+            current_tick: 1,
+            nominal_dt_seconds: 0.031_25,
+            client_id: 1,
+            world_fingerprint: WORLD,
+        };
+        assert_eq!((table.send_welcome)(connection, &raw const welcome), LNK_OK);
+        let mut everything_left = 0u8;
+        assert_eq!((table.flush)(connection, &raw mut everything_left), LNK_OK);
+        client_thread.join().expect("client thread");
+        (table.close)(connection);
+        (table.close_server)(server);
+    }
+
+    #[test]
+    fn a_body_travels_the_table_both_ways_and_its_rows_outlive_the_poll() {
+        let table = vtable();
+        let mut status: LnkStatus = -1;
+        let server = (table.listen)(0, WORLD, &raw mut status, std::ptr::null_mut(), 0);
+        assert_eq!(status, LNK_OK);
+        let port = (table.server_port)(server);
+
+        let vertices = [
+            RezVertex { position: [0.0, 0.0, 0.0] },
+            RezVertex { position: [1.0, 0.0, 0.0] },
+            RezVertex { position: [0.0, 1.0, 0.0] },
+            RezVertex { position: [0.0, 0.0, 1.0] },
+        ];
+        let triangles = [
+            RezTriangle {
+                vertices: [0, 1, 2],
+                material: 0,
+            },
+            RezTriangle {
+                vertices: [0, 2, 3],
+                material: 1,
+            },
+        ];
+        let materials = [
+            RezMaterial {
+                colour: [0.9, 0.1, 0.1],
+                index_of_refraction: 1.5,
+                emission: [0.0; 3],
+                transmission: 0.0,
+            },
+            RezMaterial {
+                colour: [0.1, 0.9, 0.1],
+                index_of_refraction: 1.0,
+                emission: [0.0, 2.0, 0.0],
+                transmission: 0.5,
+            },
+        ];
+        let mut rez = bodiless_rez(7);
+        rez.vertex_count = 4;
+        rez.triangle_count = 2;
+        rez.material_count = 2;
+
+        // The host rezzes its body; the server hears it, then rezzes it back (the relay every
+        // other citizen will receive), and the host reads its own body off the view.
+        let client_thread = std::thread::spawn(move || {
+            let table = vtable();
+            let address = CString::new(format!("127.0.0.1:{port}")).expect("address");
+            let mut welcome = unsafe { std::mem::zeroed::<Welcome>() };
+            let mut status: LnkStatus = -1;
+            let client = (table.connect)(
+                address.as_ptr(),
+                Role::CreatureHost as u8,
+                WORLD,
+                5_000,
+                &raw mut welcome,
+                &raw mut status,
+                std::ptr::null_mut(),
+                0,
+            );
+            assert_eq!(status, LNK_OK);
+            assert_eq!(welcome.world_fingerprint, WORLD);
+            assert_eq!(
+                (table.send_rez)(client, &raw const rez, vertices.as_ptr(), triangles.as_ptr(), materials.as_ptr()),
+                LNK_OK
+            );
+            let mut everything_left = 0u8;
+            assert_eq!((table.flush)(client, &raw mut everything_left), LNK_OK);
+
+            let mut view = unsafe { std::mem::zeroed::<MessageView>() };
+            let deadline = std::time::Instant::now() + PATIENCE;
+            loop {
+                match (table.poll)(client, &raw mut view) {
+                    LNK_NOTHING_YET => {
+                        assert!(std::time::Instant::now() < deadline, "the body never came back");
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    LNK_OK => break,
+                    other => panic!("poll answered {other}"),
+                }
+            }
+            assert_eq!(view.message_type, MessageType::Rez as u8);
+            // SAFETY: the type byte names the union member; the rows stay valid until the next
+            // poll or close, per the header's contract.
+            let echoed = unsafe { view.payload.rez };
+            assert_eq!(echoed.rez.creature_id, 7);
+            assert_eq!(echoed.rez.vertex_count, 4);
+            let (third_vertex, second_triangle, second_material) = unsafe { (*echoed.vertices.add(2), *echoed.triangles.add(1), *echoed.materials.add(1)) };
+            assert_eq!(third_vertex.position, [0.0, 1.0, 0.0]);
+            assert_eq!(second_triangle.vertices, [0, 2, 3]);
+            assert_eq!(second_triangle.material, 1);
+            assert_eq!(second_material.emission, [0.0, 2.0, 0.0]);
+            (table.close)(client);
+        });
+
+        let mut hello = unsafe { std::mem::zeroed::<Hello>() };
+        let connection = loop {
+            let knock = (table.accept)(server, 5_000, &raw mut hello, &raw mut status, std::ptr::null_mut(), 0);
+            if !knock.is_null() {
+                break knock;
+            }
+            assert_eq!(status, LNK_NOTHING_YET);
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(hello.world_fingerprint, WORLD);
+        let welcome = Welcome {
+            current_tick: 1,
+            nominal_dt_seconds: 0.031_25,
+            client_id: 1,
+            world_fingerprint: WORLD,
+        };
+        assert_eq!((table.send_welcome)(connection, &raw const welcome), LNK_OK);
+        let mut everything_left = 0u8;
+        assert_eq!((table.flush)(connection, &raw mut everything_left), LNK_OK);
+
+        let mut view = unsafe { std::mem::zeroed::<MessageView>() };
+        let deadline = std::time::Instant::now() + PATIENCE;
+        loop {
+            match (table.poll)(connection, &raw mut view) {
+                LNK_NOTHING_YET => {
+                    assert!(std::time::Instant::now() < deadline, "the body never arrived");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                LNK_OK => break,
+                other => panic!("poll answered {other}"),
+            }
+        }
+        assert_eq!(view.message_type, MessageType::Rez as u8);
+        // SAFETY: the type byte names the union member.
+        let heard = unsafe { view.payload.rez };
+        assert_eq!(heard.rez.triangle_count, 2);
+        // Relay it straight back off the borrowed view: the rows are the library's own copies.
+        assert_eq!(
+            (table.send_rez)(connection, &raw const heard.rez, heard.vertices, heard.triangles, heard.materials),
+            LNK_OK
+        );
+        assert_eq!((table.flush)(connection, &raw mut everything_left), LNK_OK);
+
+        client_thread.join().expect("client thread");
+        (table.close)(connection);
+        (table.close_server)(server);
+    }
+
+    #[test]
+    fn a_different_world_is_refused_through_the_table_in_both_directions() {
+        let table = vtable();
+        let mut status: LnkStatus = -1;
+        let server = (table.listen)(0, WORLD, &raw mut status, std::ptr::null_mut(), 0);
+        let port = (table.server_port)(server);
+
+        let client_thread = std::thread::spawn(move || {
+            let table = vtable();
+            let address = CString::new(format!("127.0.0.1:{port}")).expect("address");
+            let mut welcome = unsafe { std::mem::zeroed::<Welcome>() };
+            let mut status: LnkStatus = -1;
+            let mut detail = [0i8; 256];
+            let client = (table.connect)(
+                address.as_ptr(),
+                Role::CreatureHost as u8,
+                WORLD + 1,
+                5_000,
+                &raw mut welcome,
+                &raw mut status,
+                detail.as_mut_ptr().cast::<c_char>(),
+                detail.len() as u32,
+            );
+            assert!(client.is_null());
+            assert_eq!(status, LNK_REFUSED);
+            unsafe { CStr::from_ptr(detail.as_ptr().cast::<c_char>()) }.to_string_lossy().to_string()
+        });
+
+        let mut hello = unsafe { std::mem::zeroed::<Hello>() };
+        let mut detail = [0i8; 256];
+        let deadline = std::time::Instant::now() + PATIENCE;
+        loop {
+            let knock = (table.accept)(
+                server,
+                5_000,
+                &raw mut hello,
+                &raw mut status,
+                detail.as_mut_ptr().cast::<c_char>(),
+                detail.len() as u32,
+            );
+            assert!(knock.is_null(), "a citizen of another world must not be accepted");
+            if status != LNK_NOTHING_YET {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "nobody knocked");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(status, LNK_REFUSED);
+        let server_words = unsafe { CStr::from_ptr(detail.as_ptr().cast::<c_char>()) }.to_string_lossy().to_string();
+        assert!(server_words.contains("different world"), "the server's log line names the cause, got: {server_words}");
+        let client_words = client_thread.join().expect("client thread");
+        assert!(
+            client_words.contains(&format!("{WORLD:016X}")),
+            "the client hears which world it was refused by, got: {client_words}"
+        );
+        (table.close_server)(server);
+    }
+
     #[test]
     fn a_lying_tick_state_count_is_refused_before_a_single_row_is_read() {
         let table = vtable();
@@ -1079,7 +1536,7 @@ mod tests {
     fn the_server_half_refuses_nulls_too() {
         let table = vtable();
         assert!(
-            (table.listen)(0, std::ptr::null_mut(), std::ptr::null_mut(), 0).is_null(),
+            (table.listen)(0, WORLD, std::ptr::null_mut(), std::ptr::null_mut(), 0).is_null(),
             "no status pointer, no server"
         );
         assert_eq!((table.server_port)(std::ptr::null_mut()), 0);

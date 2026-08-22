@@ -12,8 +12,8 @@
 //! [`decode`]. The codec never panics on any input; every failure is a named [`DecodeError`].
 
 use crate::protocol::{
-    Actions, CreatureState, Derez, Event, EventKind, FRAME_HEADER_BYTES, Hello, MessageType, Ping, Pong, REZ_MAX_MATERIALS, REZ_MAX_TRIANGLES,
-    REZ_MAX_VERTICES, Rez, RezMaterial, RezTriangle, RezVertex, Role, TICK_STATE_MAX_CREATURES, TickStateHeader, Welcome,
+    Actions, CreatureState, Derez, Event, EventKind, FRAME_HEADER_BYTES, Hello, MessageType, Ping, Pong, REZ_MAX_MATERIALS, REZ_MAX_TRIANGLES, REZ_MAX_VERTICES, Rez,
+    RezMaterial, RezTriangle, RezVertex, Role, TICK_STATE_MAX_CREATURES, TickStateHeader, Welcome,
 };
 
 /// A decoded message, owning its payload. TICK_STATE's rows live in a `Vec` sized only after
@@ -29,7 +29,10 @@ pub enum Message {
         triangles: Vec<RezTriangle>,
         materials: Vec<RezMaterial>,
     },
-    TickState { header: TickStateHeader, states: Vec<CreatureState> },
+    TickState {
+        header: TickStateHeader,
+        states: Vec<CreatureState>,
+    },
     Actions(Actions),
     Event(Event),
     Derez(Derez),
@@ -479,10 +482,8 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
                 }
             }
 
-            let bytes = REZ_HEADER_BYTES
-                + vertices.len() * size_of::<RezVertex>()
-                + triangles.len() * size_of::<RezTriangle>()
-                + materials.len() * size_of::<RezMaterial>();
+            let bytes =
+                REZ_HEADER_BYTES + vertices.len() * size_of::<RezVertex>() + triangles.len() * size_of::<RezTriangle>() + materials.len() * size_of::<RezMaterial>();
             frame_header(out, MessageType::Rez, bytes);
             out.extend_from_slice(&header.creature_id.to_le_bytes());
             out.extend_from_slice(&header.max_forward_speed.to_le_bytes());
@@ -637,7 +638,45 @@ mod tests {
             fingerprint: [0xA5; 32],
             role: Role::CreatureHost as u8,
             reserved0: [0; 3],
+            world_fingerprint: 0x5EED,
         })
+    }
+
+    /// A REZ with every count as asked, each triangle indexing real vertices and a real
+    /// material - the body the tests rez, up to the largest one the wire admits.
+    fn sample_rez(vertices: u32, triangles: u32, materials: u32) -> Message {
+        let header = Rez {
+            creature_id: 42,
+            max_forward_speed: 1.0,
+            max_turn_rate: 1.5,
+            max_vocalisation_strength: 1.0,
+            max_contact_count: 4,
+            vertex_count: vertices,
+            triangle_count: triangles,
+            material_count: materials,
+        };
+        Message::Rez {
+            header,
+            vertices: (0..vertices)
+                .map(|index| RezVertex {
+                    position: [index as f32, 0.5, -1.0],
+                })
+                .collect(),
+            triangles: (0..triangles)
+                .map(|index| RezTriangle {
+                    vertices: [index % vertices.max(1), (index + 1) % vertices.max(1), (index + 2) % vertices.max(1)],
+                    material: index % materials.max(1),
+                })
+                .collect(),
+            materials: (0..materials)
+                .map(|index| RezMaterial {
+                    colour: [0.1, 0.2, index as f32],
+                    index_of_refraction: 1.5,
+                    emission: [0.0; 3],
+                    transmission: 0.0,
+                })
+                .collect(),
+        }
     }
 
     fn sample_tick_state(rows: u32) -> Message {
@@ -664,10 +703,14 @@ mod tests {
     fn everything() -> Vec<Message> {
         vec![
             sample_hello(),
+            sample_rez(0, 0, 0),
+            sample_rez(4, 2, 1),
+            sample_rez(REZ_MAX_VERTICES, REZ_MAX_TRIANGLES, REZ_MAX_MATERIALS),
             Message::Welcome(Welcome {
                 current_tick: 41,
                 nominal_dt_seconds: 0.03125,
                 client_id: 7,
+                world_fingerprint: 0x5EED,
             }),
             sample_tick_state(0),
             sample_tick_state(3),
@@ -741,7 +784,7 @@ mod tests {
 
     #[test]
     fn unknown_and_reserved_types_are_refused_before_any_copy() {
-        for type_byte in [0u8, MessageType::Rez as u8, 11, 200, 255] {
+        for type_byte in [0u8, 11, 200, 255] {
             assert_eq!(payload_rule(type_byte), Err(DecodeError::UnknownOrReservedType(type_byte)));
         }
     }
@@ -786,7 +829,12 @@ mod tests {
         payload[38] = 1;
         assert_eq!(decode(MessageType::Hello as u8, &payload), Err(DecodeError::ReservedNotZero));
 
-        let event = frame_of(&everything()[6]);
+        let event = frame_of(
+            everything()
+                .iter()
+                .find(|message| matches!(message, Message::Event(_)))
+                .expect("the sample set carries an EVENT"),
+        );
         let mut payload = event[FRAME_HEADER_BYTES..].to_vec();
         payload[28] = 0;
         assert_eq!(decode(MessageType::Event as u8, &payload), Err(DecodeError::InvalidEventKind(0)));
@@ -798,6 +846,7 @@ mod tests {
             fingerprint: [0; 32],
             role: 9,
             reserved0: [0; 3],
+            world_fingerprint: 0x5EED,
         });
         assert_eq!(encode(&bad_role, &mut out), Err(EncodeError::InvalidRole(9)));
         assert!(out.is_empty(), "a refused encode must write nothing");
@@ -868,9 +917,148 @@ mod tests {
 
     #[test]
     fn the_receive_buffer_constant_really_is_the_largest_legal_frame() {
-        let largest = frame_of(&sample_tick_state(TICK_STATE_MAX_CREATURES));
-        assert_eq!(largest.len(), max_frame_bytes());
+        // Since protocol v4 the largest legal frame is a full REZ, not a full tick: the body
+        // outweighs the world, and the receive buffer is sized by whichever is larger.
+        let largest_rez = frame_of(&sample_rez(REZ_MAX_VERTICES, REZ_MAX_TRIANGLES, REZ_MAX_MATERIALS));
+        let largest_tick = frame_of(&sample_tick_state(TICK_STATE_MAX_CREATURES));
+        assert_eq!(largest_rez.len().max(largest_tick.len()), max_frame_bytes());
+        assert!(largest_rez.len() > largest_tick.len(), "the premise: a full body outweighs a full tick");
         assert!(max_frame_bytes() <= FRAME_HEADER_BYTES + FRAME_PAYLOAD_LIMIT);
+    }
+
+    #[test]
+    fn a_rez_over_any_cap_is_refused_before_a_row_is_read() {
+        for (vertices, triangles, materials) in [(REZ_MAX_VERTICES + 1, 0, 0), (0, REZ_MAX_TRIANGLES + 1, 0), (0, 0, REZ_MAX_MATERIALS + 1)] {
+            // Encode side: the counts are judged before the rows are even compared.
+            let Message::Rez { header, .. } = sample_rez(0, 0, 0) else { unreachable!() };
+            let lying = Message::Rez {
+                header: Rez {
+                    vertex_count: vertices,
+                    triangle_count: triangles,
+                    material_count: materials,
+                    ..header
+                },
+                vertices: Vec::new(),
+                triangles: Vec::new(),
+                materials: Vec::new(),
+            };
+            let mut out = Vec::new();
+            assert_eq!(encode(&lying, &mut out), Err(EncodeError::RezCountOverCap { vertices, triangles, materials }));
+            assert!(out.is_empty(), "nothing is written before the refusal");
+
+            // Decode side: a header claiming the count, with a payload of exactly header size -
+            // the cap verdict comes before the length verdict, so the rows are never wanted.
+            let mut payload = frame_of(&sample_rez(0, 0, 0))[FRAME_HEADER_BYTES..].to_vec();
+            payload[20..24].copy_from_slice(&vertices.to_le_bytes());
+            payload[24..28].copy_from_slice(&triangles.to_le_bytes());
+            payload[28..32].copy_from_slice(&materials.to_le_bytes());
+            assert_eq!(
+                decode(MessageType::Rez as u8, &payload),
+                Err(DecodeError::RezCountOverCap { vertices, triangles, materials })
+            );
+        }
+    }
+
+    #[test]
+    fn a_rez_whose_counts_and_length_disagree_is_refused() {
+        let frame = frame_of(&sample_rez(4, 2, 1));
+        let payload = &frame[FRAME_HEADER_BYTES..];
+        // One byte short, one byte long: the exact sum is the law.
+        let short = &payload[..payload.len() - 1];
+        assert!(matches!(decode(MessageType::Rez as u8, short), Err(DecodeError::RezLengthMismatch { .. })));
+        let mut long = payload.to_vec();
+        long.push(0);
+        assert!(matches!(decode(MessageType::Rez as u8, &long), Err(DecodeError::RezLengthMismatch { .. })));
+        // Shorter than the header itself is refused at header time, by the rule.
+        assert!(matches!(
+            check_length(PayloadRule::Rez, REZ_HEADER_BYTES - 1),
+            Err(DecodeError::RezLengthMismatch { .. })
+        ));
+        assert!(matches!(
+            check_length(PayloadRule::Rez, max_rez_payload_bytes() + 1),
+            Err(DecodeError::RezLengthMismatch { .. })
+        ));
+        assert_eq!(check_length(PayloadRule::Rez, REZ_HEADER_BYTES), Ok(()));
+    }
+
+    #[test]
+    fn a_rez_triangle_pointing_past_its_vertices_or_materials_is_refused_both_ways() {
+        for (vertex, material) in [(4u32, 0u32), (0, 1), (u32::MAX, 0)] {
+            let Message::Rez {
+                header,
+                vertices,
+                mut triangles,
+                materials,
+            } = sample_rez(4, 2, 1)
+            else {
+                unreachable!()
+            };
+            triangles[1] = RezTriangle {
+                vertices: [0, 1, vertex],
+                material,
+            };
+            let lying = Message::Rez {
+                header,
+                vertices,
+                triangles,
+                materials,
+            };
+            let mut out = Vec::new();
+            assert_eq!(encode(&lying, &mut out), Err(EncodeError::RezIndexOutOfRange { triangle: 1 }));
+
+            // The same lie on the wire: patch the second triangle's bytes of an honest frame.
+            let mut frame = frame_of(&sample_rez(4, 2, 1));
+            let triangle_at = FRAME_HEADER_BYTES + REZ_HEADER_BYTES + 4 * size_of::<RezVertex>() + size_of::<RezTriangle>();
+            frame[triangle_at + 8..triangle_at + 12].copy_from_slice(&vertex.to_le_bytes());
+            frame[triangle_at + 12..triangle_at + 16].copy_from_slice(&material.to_le_bytes());
+            assert_eq!(
+                decode(MessageType::Rez as u8, &frame[FRAME_HEADER_BYTES..]),
+                Err(DecodeError::RezIndexOutOfRange { triangle: 1 })
+            );
+        }
+    }
+
+    #[test]
+    fn a_rez_carrying_a_nan_anywhere_is_refused_both_ways() {
+        // Offsets into the payload of every float a REZ carries, by family: a bound, a vertex
+        // coordinate, a material channel.
+        let vertex_at = REZ_HEADER_BYTES;
+        let material_at = REZ_HEADER_BYTES + 4 * size_of::<RezVertex>() + 2 * size_of::<RezTriangle>();
+        for offset in [4usize, vertex_at + 4, material_at + 12] {
+            for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let mut frame = frame_of(&sample_rez(4, 2, 1));
+                let at = FRAME_HEADER_BYTES + offset;
+                frame[at..at + 4].copy_from_slice(&poison.to_le_bytes());
+                assert_eq!(
+                    decode(MessageType::Rez as u8, &frame[FRAME_HEADER_BYTES..]),
+                    Err(DecodeError::RezNotFinite),
+                    "offset {offset} poisoned with {poison} was accepted"
+                );
+            }
+        }
+        let Message::Rez {
+            header,
+            mut vertices,
+            triangles,
+            materials,
+        } = sample_rez(4, 2, 1)
+        else {
+            unreachable!()
+        };
+        vertices[3].position[2] = f32::NAN;
+        let mut out = Vec::new();
+        assert_eq!(
+            encode(
+                &Message::Rez {
+                    header,
+                    vertices,
+                    triangles,
+                    materials
+                },
+                &mut out
+            ),
+            Err(EncodeError::RezNotFinite)
+        );
     }
 
     /// Bombardment: deterministic junk, every length up to a whole tick-state, every type byte

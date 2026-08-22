@@ -466,10 +466,13 @@ impl Listener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Actions, TICK_STATE_MAX_CREATURES};
+    use crate::protocol::{Actions, Rez, TICK_STATE_MAX_CREATURES};
     use std::net::TcpListener;
 
     const PATIENCE: Duration = Duration::from_secs(5);
+    /// The one world every test here lives in - a fingerprint, not a definition, because the
+    /// transport only ever compares the number.
+    const WORLD: u64 = 0x5EED_0F7E_601D;
 
     fn loopback() -> (TcpListener, std::net::SocketAddr) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
@@ -482,6 +485,7 @@ mod tests {
             current_tick: 100,
             nominal_dt_seconds: 0.03125,
             client_id: 1,
+            world_fingerprint: WORLD,
         })
     }
 
@@ -515,7 +519,7 @@ mod tests {
         let (listener, address) = loopback();
 
         let client = std::thread::spawn(move || {
-            let (mut connection, welcome) = connect(address, &local_hello(Role::CreatureHost), PATIENCE).expect("handshake");
+            let (mut connection, welcome) = connect(address, &local_hello(Role::CreatureHost, WORLD), PATIENCE).expect("handshake");
             assert_eq!(welcome.current_tick, 100);
             connection.queue(&actions(101)).expect("queue");
             connection.queue(&actions(102)).expect("queue");
@@ -523,7 +527,7 @@ mod tests {
         });
 
         let (stream, _) = listener.accept().expect("accept");
-        let (mut connection, hello) = accept(stream, PATIENCE).expect("server handshake");
+        let (mut connection, hello) = accept(stream, PATIENCE, WORLD).expect("server handshake");
         assert_eq!(hello.role, Role::CreatureHost as u8);
         assert_eq!(hello.protocol_version, PROTOCOL_VERSION);
         connection.queue(&welcome()).expect("queue WELCOME");
@@ -548,7 +552,7 @@ mod tests {
         });
 
         let (stream, _) = listener.accept().expect("accept");
-        let refusal = accept(stream, PATIENCE);
+        let refusal = accept(stream, PATIENCE, WORLD);
         let Err(TransportError::Refused { reason }) = refusal else {
             panic!("bad magic must be a worded refusal, got {refusal:?}");
         };
@@ -563,7 +567,7 @@ mod tests {
         let (listener, address) = loopback();
 
         let client = std::thread::spawn(move || {
-            let mut wrong = local_hello(Role::Spectator);
+            let mut wrong = local_hello(Role::Spectator, WORLD);
             wrong.fingerprint[0] ^= 0xFF;
             let error = connect(address, &wrong, PATIENCE).expect_err("a wrong fingerprint must not connect");
             let TransportError::Refused { reason } = error else {
@@ -573,7 +577,7 @@ mod tests {
         });
 
         let (stream, _) = listener.accept().expect("accept");
-        assert!(matches!(accept(stream, PATIENCE), Err(TransportError::Refused { .. })));
+        assert!(matches!(accept(stream, PATIENCE, WORLD), Err(TransportError::Refused { .. })));
 
         let reason = client.join().expect("client thread");
         assert!(reason.contains("fingerprint mismatch"), "got: {reason}");
@@ -588,7 +592,7 @@ mod tests {
         let (listener, address) = loopback();
 
         let client = std::thread::spawn(move || {
-            let mut wrong = local_hello(Role::Spectator);
+            let mut wrong = local_hello(Role::Spectator, WORLD);
             wrong.fingerprint[0] ^= 0xFF;
             wrong.protocol_version = PROTOCOL_VERSION + 1;
             let error = connect(address, &wrong, PATIENCE).expect_err("a wrong fingerprint must not connect");
@@ -599,7 +603,7 @@ mod tests {
         });
 
         let (stream, _) = listener.accept().expect("accept");
-        assert!(matches!(accept(stream, PATIENCE), Err(TransportError::Refused { .. })));
+        assert!(matches!(accept(stream, PATIENCE, WORLD), Err(TransportError::Refused { .. })));
 
         let reason = client.join().expect("client thread");
         assert!(
@@ -615,7 +619,7 @@ mod tests {
         // A hostile client: introduces itself as a spectator, then queues ACTIONS at the
         // transport layer, beneath the ABI's own sending-half refusal.
         let client = std::thread::spawn(move || {
-            let (mut connection, _) = connect(address, &local_hello(Role::Spectator), PATIENCE).expect("handshake");
+            let (mut connection, _) = connect(address, &local_hello(Role::Spectator, WORLD), PATIENCE).expect("handshake");
             connection.queue(&actions(9)).expect("the codec itself does not know roles");
             // The server may hang up on the violation while this end is still flushing; that
             // is the refusal working, not a test failure.
@@ -629,7 +633,7 @@ mod tests {
         });
 
         let (stream, _) = listener.accept().expect("accept");
-        let (mut server_side, hello) = accept(stream, PATIENCE).expect("handshake");
+        let (mut server_side, hello) = accept(stream, PATIENCE, WORLD).expect("handshake");
         assert_eq!(hello.role, Role::Spectator as u8);
 
         // The client's connect blocks on WELCOME; the violation only flows once it is a citizen.
@@ -638,6 +642,7 @@ mod tests {
                 current_tick: 1,
                 nominal_dt_seconds: 0.031_25,
                 client_id: 1,
+                world_fingerprint: WORLD,
             }))
             .expect("queue welcome");
         while !server_side.flush().expect("flush welcome") {}
@@ -657,6 +662,104 @@ mod tests {
             "a spectator's ACTIONS must end the connection, got {verdict:?}"
         );
         drop(client.join().expect("client thread"));
+    }
+
+    /// A bodiless REZ: every count zero, the one shape a spectator could plausibly try.
+    fn bodiless_rez() -> Message {
+        Message::Rez {
+            header: Rez {
+                creature_id: 1,
+                max_forward_speed: 1.0,
+                max_turn_rate: 1.0,
+                max_vocalisation_strength: 1.0,
+                max_contact_count: 4,
+                vertex_count: 0,
+                triangle_count: 0,
+                material_count: 0,
+            },
+            vertices: Vec::new(),
+            triangles: Vec::new(),
+            materials: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn rez_from_a_spectator_ends_the_connection_at_the_server_too() {
+        let (listener, address) = loopback();
+        let client = std::thread::spawn(move || {
+            let (mut connection, _) = connect(address, &local_hello(Role::Spectator, WORLD), PATIENCE).expect("handshake");
+            connection.queue(&bodiless_rez()).expect("the codec itself does not know roles");
+            loop {
+                match connection.flush() {
+                    Ok(true) | Err(_) => break,
+                    Ok(false) => {}
+                }
+            }
+            connection
+        });
+
+        let (stream, _) = listener.accept().expect("accept");
+        let (mut server_side, _) = accept(stream, PATIENCE, WORLD).expect("handshake");
+        server_side.queue(&welcome()).expect("queue welcome");
+        while !server_side.flush().expect("flush welcome") {}
+
+        let deadline = std::time::Instant::now() + PATIENCE;
+        let verdict = loop {
+            match server_side.poll() {
+                Ok(None) => {
+                    assert!(std::time::Instant::now() < deadline, "the violation never arrived");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                other => break other,
+            }
+        };
+        assert!(
+            matches!(verdict, Err(TransportError::ActionsFromSpectator)),
+            "a spectator's REZ must end the connection like its ACTIONS would, got {verdict:?}"
+        );
+        drop(client.join().expect("client thread"));
+    }
+
+    #[test]
+    fn a_different_world_is_refused_at_the_door_naming_both_fingerprints() {
+        let (listener, address) = loopback();
+        let client = std::thread::spawn(move || {
+            let Err(TransportError::Refused { reason }) = connect(address, &local_hello(Role::CreatureHost, WORLD + 1), PATIENCE) else {
+                panic!("a citizen of another world must be refused in words");
+            };
+            reason
+        });
+
+        let (stream, _) = listener.accept().expect("accept");
+        assert!(matches!(accept(stream, PATIENCE, WORLD), Err(TransportError::Refused { .. })));
+
+        let reason = client.join().expect("client thread");
+        assert!(
+            reason.contains(&format!("{:016X}", WORLD + 1)) && reason.contains(&format!("{WORLD:016X}")),
+            "both worlds must be named, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn a_server_from_a_different_world_is_refused_by_the_client() {
+        // The server half of the check is skipped on purpose: a server that forgets to compare
+        // (or lies in its WELCOME) is still caught, because the client compares too.
+        let (listener, address) = loopback();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let (mut server_side, _) = accept(stream, PATIENCE, WORLD + 1).expect("this server accepts the other world");
+            let Message::Welcome(mut welcome) = welcome() else { unreachable!() };
+            welcome.world_fingerprint = WORLD; // the lie: it welcomed WORLD + 1
+            server_side.queue(&Message::Welcome(welcome)).expect("queue welcome");
+            let _ = server_side.flush();
+        });
+
+        let verdict = connect(address, &local_hello(Role::CreatureHost, WORLD + 1), PATIENCE);
+        let Err(TransportError::Refused { reason }) = verdict else {
+            panic!("a WELCOME from another world must be refused in words, got {verdict:?}");
+        };
+        assert!(reason.contains("different worlds"), "got: {reason}");
+        server.join().expect("server thread");
     }
 
     #[test]
@@ -680,7 +783,7 @@ mod tests {
         let client = std::thread::spawn(move || {
             // A creature host, because the dribbled frame is ACTIONS and a spectator's would
             // now be refused as the role violation it is.
-            let (connection, _) = connect(address, &local_hello(Role::CreatureHost), PATIENCE).expect("handshake");
+            let (connection, _) = connect(address, &local_hello(Role::CreatureHost, WORLD), PATIENCE).expect("handshake");
             let mut frame = Vec::new();
             encode(&actions(7), &mut frame).expect("encode");
             let mut raw = connection.stream;
@@ -693,7 +796,7 @@ mod tests {
         });
 
         let (stream, _) = listener.accept().expect("accept");
-        let (mut connection, _) = accept(stream, PATIENCE).expect("server handshake");
+        let (mut connection, _) = accept(stream, PATIENCE, WORLD).expect("server handshake");
         connection.queue(&welcome()).expect("queue");
         assert!(connection.flush().expect("flush"));
 
@@ -706,17 +809,17 @@ mod tests {
         let (listener, address) = loopback();
 
         let client = std::thread::spawn(move || {
-            let (connection, _) = connect(address, &local_hello(Role::Spectator), PATIENCE).expect("handshake");
+            let (connection, _) = connect(address, &local_hello(Role::Spectator, WORLD), PATIENCE).expect("handshake");
             let mut raw = connection.stream;
             raw.set_nonblocking(false).expect("blocking");
-            // Length 65535 declared for a HELLO, whose rule is exactly 40: refused from the
+            // Length 65535 declared for a HELLO, whose rule is exactly 48: refused from the
             // header alone, no payload ever read.
             raw.write_all(&[0xFF, 0xFF, MessageType::Hello as u8]).expect("hostile header");
             raw.flush().expect("flush");
         });
 
         let (stream, _) = listener.accept().expect("accept");
-        let (mut connection, _) = accept(stream, PATIENCE).expect("server handshake");
+        let (mut connection, _) = accept(stream, PATIENCE, WORLD).expect("server handshake");
         connection.queue(&welcome()).expect("queue");
         assert!(connection.flush().expect("flush"));
 
@@ -731,7 +834,7 @@ mod tests {
             }
         };
         assert!(
-            matches!(verdict, Err(TransportError::Frame(DecodeError::WrongLength { expected: 40, got: 65535 }))),
+            matches!(verdict, Err(TransportError::Frame(DecodeError::WrongLength { expected: 48, got: 65535 }))),
             "got {verdict:?}"
         );
         client.join().expect("client thread");
@@ -788,6 +891,6 @@ mod tests {
     fn the_recorded_fingerprint_parses_and_is_not_nothing() {
         let fingerprint = recorded_fingerprint();
         assert_ne!(fingerprint, [0u8; 32]);
-        assert_eq!(local_hello(Role::Spectator).fingerprint, fingerprint);
+        assert_eq!(local_hello(Role::Spectator, WORLD).fingerprint, fingerprint);
     }
 }

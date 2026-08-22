@@ -450,7 +450,10 @@ mod tests {
             header.contains(&format!("#define LNK_ACTIONS_REPEAT_TICKS {ACTIONS_REPEAT_TICKS}u")),
             "LNK_ACTIONS_REPEAT_TICKS drifted"
         );
-        assert!(header.contains(&format!("#define LNK_REZ_MAX_VERTICES {REZ_MAX_VERTICES}u")), "LNK_REZ_MAX_VERTICES drifted");
+        assert!(
+            header.contains(&format!("#define LNK_REZ_MAX_VERTICES {REZ_MAX_VERTICES}u")),
+            "LNK_REZ_MAX_VERTICES drifted"
+        );
         assert!(
             header.contains(&format!("#define LNK_REZ_MAX_TRIANGLES {REZ_MAX_TRIANGLES}u")),
             "LNK_REZ_MAX_TRIANGLES drifted"
