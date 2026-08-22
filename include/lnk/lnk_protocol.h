@@ -80,7 +80,7 @@ extern "C"
     The receiver validates length against the expected size for the type BEFORE copying or
     allocating anything. For every fixed-size message the length must EQUAL the payload struct's
     size - not merely fit under a maximum, so a truncated or padded frame is refused rather than
-    partially read. The two variable-size messages (TICK_STATE now, REZ when its layout lands)
+    partially read. The three variable-size messages (TICK_STATE, REZ and PROPRIOCEPTION)
     state their own length rule beside their structs.
 */
 
@@ -309,7 +309,8 @@ typedef struct LnkActions {
 #define LNK_ACTIONS_REPEAT_TICKS 1u
 
 /*! EVENT, server to every client: a tick-stamped notification, never load-bearing state. The
-    spectator synthesises its audio from these; a creature host ignores them today. */
+    spectator synthesises its audio from these, and a creature host lets its hosted senses
+    hear the guests' calls through them. */
 typedef struct LnkEvent {
     uint64_t tick;
     float position[3];      /*!< Where it happened, metres, world space. */

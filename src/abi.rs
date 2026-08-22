@@ -333,7 +333,11 @@ fn write_detail(detail: *mut c_char, capacity: u32, text: &str) {
     }
     let room = (capacity - 1) as usize;
     let bytes = text.as_bytes();
-    let take = bytes.len().min(room);
+    let mut take = bytes.len().min(room);
+    // Never cut a UTF-8 sequence: back off to a character boundary, so the line stays UTF-8.
+    while take > 0 && !text.is_char_boundary(take) {
+        take -= 1;
+    }
     // SAFETY: the caller handed this buffer and its capacity as a pair; writing at most
     // capacity-1 bytes plus the terminator stays inside what it promised.
     unsafe {
@@ -400,6 +404,9 @@ extern "C" fn connect_impl(
 
         if address_utf8.is_null() || out_welcome.is_null() {
             return refuse(LNK_BAD_ARGUMENT, "link: a null pointer is not an argument");
+        }
+        if timeout_milliseconds == 0 {
+            return refuse(LNK_BAD_ARGUMENT, "link: a zero timeout waits for nothing - give the handshake a bound");
         }
         // SAFETY: the caller promised a NUL-terminated string; from_ptr reads to the NUL.
         let address = match unsafe { CStr::from_ptr(address_utf8) }.to_str() {
@@ -703,6 +710,9 @@ extern "C" fn accept_impl(
         if server.is_null() || out_hello.is_null() {
             return refuse(LNK_BAD_ARGUMENT, "link: a null pointer is not an argument");
         }
+        if timeout_milliseconds == 0 {
+            return refuse(LNK_BAD_ARGUMENT, "link: a zero timeout waits for nothing - give the handshake a bound");
+        }
         // SAFETY: non-null was just checked; validity is the header's stated contract.
         let inner = unsafe { server_of(server) };
 
@@ -962,6 +972,43 @@ extern "C" fn close_impl(client: *mut LnkClient) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_zero_timeout_is_a_bad_argument_at_both_ends_before_any_knock_is_answered() {
+        let table = vtable();
+        let mut status: LnkStatus = -1;
+        let mut detail = [0i8; 128];
+        let mut welcome = unsafe { std::mem::zeroed::<Welcome>() };
+        let address = CString::new("127.0.0.1:1").expect("address");
+        let client = (table.connect)(
+            address.as_ptr(),
+            Role::Spectator as u8,
+            WORLD,
+            0,
+            &raw mut welcome,
+            &raw mut status,
+            detail.as_mut_ptr().cast::<c_char>(),
+            detail.len() as u32,
+        );
+        assert!(client.is_null());
+        assert_eq!(status, LNK_BAD_ARGUMENT);
+        let server = (table.listen)(0, WORLD, &raw mut status, detail.as_mut_ptr().cast::<c_char>(), detail.len() as u32);
+        assert!(!server.is_null());
+        let mut hello = unsafe { std::mem::zeroed::<Hello>() };
+        let knock = (table.accept)(server, 0, &raw mut hello, &raw mut status, detail.as_mut_ptr().cast::<c_char>(), detail.len() as u32);
+        assert!(knock.is_null());
+        assert_eq!(status, LNK_BAD_ARGUMENT, "judged before any knock, with nobody knocking");
+        (table.close_server)(server);
+    }
+
+    #[test]
+    fn the_detail_never_cuts_a_utf8_sequence() {
+        let mut detail = [0u8; 6];
+        // "aé" is three bytes; room for five bytes would cut the second "é" in half.
+        super::write_detail(detail.as_mut_ptr().cast::<c_char>(), detail.len() as u32, "aéaé");
+        let words = unsafe { CStr::from_ptr(detail.as_ptr().cast::<c_char>()) };
+        assert_eq!(words.to_str().expect("the line stays UTF-8"), "aéa");
+    }
+
     use super::*;
     use crate::codec::Message;
     use crate::protocol::{EventKind, TICK_STATE_MAX_CREATURES, TickStateHeader};
