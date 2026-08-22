@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Every message flows its own way only.** The letter already did; now the rule is whole. A
+  WELCOME, TICK_STATE, EVENT or PROPRIOCEPTION arriving at the server, or a HELLO or ACTIONS
+  arriving at a client, ends the connection before the consumer sees it -
+  `TransportError::WrongWay(name)`, `LNK_FRAME_REFUSED` with the name in the detail - because
+  an interval refuses both directions of nonsense and an end that speaks the other's words is
+  not a peer. Master Control's adversarial suite found the gap: a raw citizen could send the
+  world a WELCOME and be quietly ignored. No wire change; the fingerprint stands. Tested at
+  both ends for every one of the six; one breakage round (EVENT let through) caught.
+
 - **Protocol version 6: the contact knows its face, and a slide makes a sound.** `LnkContact`
   grows what the exact-contacts ruling named: the face's unit normal (world frame), the depth
   the body stood past it, and the slip - the body's velocity along the face, body frame -

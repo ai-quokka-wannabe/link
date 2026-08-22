@@ -44,9 +44,11 @@ pub enum TransportError {
     /// library enforces itself, on the server end, so the rule cannot drift between consumers.
     /// The connection is shut before this is returned.
     ActionsFromSpectator,
-    /// A PROPRIOCEPTION frame arrived at the server: the letter flows one way only, and a
-    /// client that sends one is violating the protocol. The connection is shut first.
-    ProprioceptionAtServer,
+    /// A message arrived at the end that only sends it: WELCOME, TICK_STATE, EVENT or
+    /// PROPRIOCEPTION at the server, HELLO or ACTIONS at the client. Every message flows one
+    /// way, and an end that speaks the other's words is violating the protocol - an interval
+    /// refuses both directions of nonsense. The name says which; the connection is shut first.
+    WrongWay(&'static str),
     /// The outgoing buffer passed [`WRITE_BUFFER_LIMIT_BYTES`] — the peer is not reading, and
     /// an unbounded buffer would be an allocation the peer controls. The connection is over.
     WriteBufferOverflow,
@@ -263,9 +265,24 @@ impl Connection {
                     let _ = self.stream.shutdown(Shutdown::Both);
                     return Err(TransportError::ActionsFromSpectator);
                 }
-                if matches!(message, Message::Proprioception { .. }) && self.server_held {
+                let wrong_way = if self.server_held {
+                    match message {
+                        Message::Welcome(_) => Some("WELCOME"),
+                        Message::TickState { .. } => Some("TICK_STATE"),
+                        Message::Event(_) => Some("EVENT"),
+                        Message::Proprioception { .. } => Some("PROPRIOCEPTION"),
+                        _ => None,
+                    }
+                } else {
+                    match message {
+                        Message::Hello(_) => Some("HELLO"),
+                        Message::Actions(_) => Some("ACTIONS"),
+                        _ => None,
+                    }
+                };
+                if let Some(name) = wrong_way {
                     let _ = self.stream.shutdown(Shutdown::Both);
-                    return Err(TransportError::ProprioceptionAtServer);
+                    return Err(TransportError::WrongWay(name));
                 }
                 Ok(Some(message))
             }
@@ -811,10 +828,105 @@ mod tests {
             }
         };
         assert!(
-            matches!(verdict, Err(TransportError::ProprioceptionAtServer)),
+            matches!(verdict, Err(TransportError::WrongWay("PROPRIOCEPTION"))),
             "a letter arriving at the server ends the connection, got {verdict:?}"
         );
         drop(client.join().expect("client thread"));
+    }
+
+    #[test]
+    fn every_message_flows_its_own_way_only() {
+        // The server's words at the server, the client's words at the client: each one ends
+        // the connection, because an interval refuses both directions of nonsense. The
+        // letter's own test above is the first of these; here are the rest.
+        let tick_state = Message::TickState {
+            header: crate::protocol::TickStateHeader {
+                tick: 1,
+                creature_count: 0,
+                reserved0: [0; 4],
+            },
+            states: Vec::new(),
+        };
+        let event = Message::Event(crate::protocol::Event {
+            tick: 1,
+            position: [0.0; 3],
+            strength: 1.0,
+            creature_id: 1,
+            kind: crate::protocol::EventKind::Vocalisation as u8,
+            reserved0: [0; 3],
+        });
+        let actions = Message::Actions(Actions {
+            tick: 2,
+            creature_id: 1,
+            desired_forward_speed: 1.0,
+            desired_turn_rate: 0.0,
+            vocalisation_strength: 0.0,
+            previous_forward_speed: 0.0,
+            previous_turn_rate: 0.0,
+            previous_vocalisation: 0.0,
+            reserved0: [0; 4],
+        });
+        let hello = Message::Hello(local_hello(Role::Spectator, WORLD));
+
+        // At the server: what only a server says.
+        for (name, nonsense) in [("WELCOME", welcome()), ("TICK_STATE", tick_state.clone()), ("EVENT", event.clone())] {
+            let (listener, address) = loopback();
+            let client = std::thread::spawn(move || {
+                let (mut connection, _) = connect(address, &local_hello(Role::CreatureHost, WORLD), PATIENCE).expect("handshake");
+                connection.queue(&nonsense).expect("the codec itself does not know ends");
+                loop {
+                    match connection.flush() {
+                        Ok(true) | Err(_) => break,
+                        Ok(false) => {}
+                    }
+                }
+                connection
+            });
+            let (stream, _) = listener.accept().expect("accept");
+            let (mut server_side, _) = accept(stream, PATIENCE, WORLD).expect("handshake");
+            server_side.queue(&welcome()).expect("queue welcome");
+            while !server_side.flush().expect("flush") {}
+            let verdict = await_verdict(&mut server_side);
+            assert!(
+                matches!(verdict, Err(TransportError::WrongWay(_))),
+                "{name} arriving at the server ends the connection, got {verdict:?}"
+            );
+            drop(client.join().expect("client thread"));
+        }
+
+        // At the client: what only a client says.
+        for (name, nonsense) in [("ACTIONS", actions), ("HELLO", hello)] {
+            let (listener, address) = loopback();
+            let server = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().expect("accept");
+                let (mut server_side, _) = accept(stream, PATIENCE, WORLD).expect("handshake");
+                server_side.queue(&welcome()).expect("queue welcome");
+                server_side.queue(&nonsense).expect("the codec itself does not know ends");
+                while !server_side.flush().expect("flush") {}
+                server_side
+            });
+            let (mut connection, _) = connect(address, &local_hello(Role::CreatureHost, WORLD), PATIENCE).expect("handshake");
+            let verdict = await_verdict(&mut connection);
+            assert!(
+                matches!(verdict, Err(TransportError::WrongWay(_))),
+                "{name} arriving at the client ends the connection, got {verdict:?}"
+            );
+            drop(server.join().expect("server thread"));
+        }
+    }
+
+    /// Poll until something other than "nothing yet", within patience.
+    fn await_verdict(connection: &mut Connection) -> Result<Option<Message>, TransportError> {
+        let deadline = std::time::Instant::now() + PATIENCE;
+        loop {
+            match connection.poll() {
+                Ok(None) => {
+                    assert!(std::time::Instant::now() < deadline, "the verdict never arrived");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                other => break other,
+            }
+        }
     }
 
     #[test]
