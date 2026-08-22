@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **An orderly release: `close` lets the farewell land.** `close` used to send `BYE` and slam
+  both halves of the socket. A peer with a tick in flight then answered that tick with a TCP
+  reset, and a reset discards the peer's unread receive buffer - `BYE` included - so a polite
+  leave arrived at Master Control as a crash, and the creature was orphaned instead of
+  derezzed. `close` now shuts only the writing half, drains what the peer still sends for
+  `FAREWELL_WINDOW` (250 ms) or until the peer closes too, then releases. Found the honest way:
+  the first per-owner letter made the server write often enough to lose the farewell. A test
+  writes a full tick at a closing peer and requires the `BYE` to survive it.
 - **Protocol version 5: proprioception is a letter, not a broadcast.** A creature host is owed
   what a spectator has no use for - the specific force its otolith reads, whether its feet
   touch the ground, and the tick's contacts. Rather than grow every `TICK_STATE` row, the
