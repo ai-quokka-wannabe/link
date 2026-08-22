@@ -86,6 +86,24 @@ impl RecordingHeader {
     }
 }
 
+/// The judgement every Disk path passes before a file is touched: it names a `.disk`, and it
+/// never climbs - no `..` component - so a path handed across the ABI can reach only where the
+/// caller's own working directory or absolute root says. The operator chooses the path; this
+/// rule makes a typo a refusal rather than a file somewhere surprising.
+fn judged_path(path: &Path) -> Result<&Path, TransportError> {
+    if path.extension().and_then(|extension| extension.to_str()) != Some("disk") {
+        return Err(TransportError::Refused {
+            reason: "link: a Disk is named with the .disk extension".to_string(),
+        });
+    }
+    if path.components().any(|component| matches!(component, std::path::Component::ParentDir)) {
+        return Err(TransportError::Refused {
+            reason: "link: a Disk path never climbs - no .. component".to_string(),
+        });
+    }
+    Ok(path)
+}
+
 /// A server-held end with no peer: everything queued is written to the file on flush, exactly
 /// as it would have gone down a socket.
 pub struct Recorder {
@@ -98,7 +116,7 @@ impl Recorder {
     /// Create the file and write its header. The fingerprint is this build's own; the world
     /// fingerprint and the start are the caller's, as a WELCOME's would be.
     pub fn create(path: &Path, world_fingerprint: u64, start_tick: u64, nominal_dt_seconds: f32, start_unix_seconds: u64) -> Result<Recorder, TransportError> {
-        let mut file = BufWriter::new(File::create(path)?);
+        let mut file = BufWriter::new(File::create(judged_path(path)?)?);
         let header = RecordingHeader {
             protocol_version: PROTOCOL_VERSION,
             fingerprint: recorded_fingerprint(),
@@ -160,7 +178,7 @@ impl Replayer {
     /// naming both fingerprints - the same words a server would use, because a replay viewer is
     /// a client and deserves the same refusals.
     pub fn open(path: &Path, world_fingerprint: u64) -> Result<Replayer, TransportError> {
-        let mut file = BufReader::new(File::open(path)?);
+        let mut file = BufReader::new(File::open(judged_path(path)?)?);
         let header = RecordingHeader::read_from(&mut file)?;
         if header.fingerprint != recorded_fingerprint() {
             return Err(TransportError::Refused {
@@ -262,6 +280,17 @@ mod tests {
         assert!(matches!(replay.poll(), Ok(Some(Message::Bye))));
         assert!(matches!(replay.poll(), Err(TransportError::PeerClosed)), "the end of the file is the peer closing");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_disk_path_must_be_a_disk_and_must_not_climb() {
+        let climbing = std::path::PathBuf::from("../somewhere/else.disk");
+        assert!(matches!(Recorder::create(&climbing, 1, 0, 0.031_25, 0), Err(TransportError::Refused { .. })));
+        assert!(matches!(Replayer::open(&climbing, 1), Err(TransportError::Refused { .. })));
+        let mut not_a_disk = std::env::temp_dir();
+        not_a_disk.push("link-not-a-disk.txt");
+        assert!(matches!(Recorder::create(&not_a_disk, 1, 0, 0.031_25, 0), Err(TransportError::Refused { .. })));
+        assert!(!not_a_disk.exists(), "a refused path is never touched");
     }
 
     #[test]
