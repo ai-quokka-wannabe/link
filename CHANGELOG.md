@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A Disk: a client whose socket is a file (ABI v6).** The state log the topology owes is not a
+  second encoder. `record_open` opens a recording - a server-held end with no peer; every
+  `send_*` stages a frame, `flush` writes them all, `poll` hears nothing, `close` writes `BYE` -
+  and Master Control feeds it from the same per-subscriber loop as every citizen, so the file
+  holds what was said in the wire's own bytes. `replay_open` opens it as a client-held end whose
+  `poll` yields the frames in order and whose end of file is `LNK_PEER_CLOSED`; its header -
+  protocol fingerprint, world fingerprint, start tick, dt, start time - is judged as a handshake
+  is, in the same words (another contract, another world), and `send_*` on a replay is refused
+  because a replay has nobody to talk to. The owner named it: a recording is a *Disk* (`.disk`,
+  after the identity disc that holds everything a program has done and seen), and the program
+  that reads Disks back is *Clu*. The wire itself is unchanged - protocol v5, fingerprint kept -
+  so a v5 world and a v6 library agree on every frame. Three breakage rounds discriminated.
 - **The letter speaks body frame - the header now says so.** `LnkProprioception`'s specific
   force and `LnkContact`'s position and impulse were documented as world space; the physics
   produces them in the body frame, exactly as the Program ABI's `TglSenses` and `TglContact`

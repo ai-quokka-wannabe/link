@@ -108,7 +108,7 @@ pub const REFUSAL_LIMIT_BYTES: usize = 256;
 
 /// Incremental frame reassembly with the header judged before the payload is read.
 #[derive(Debug)]
-struct FrameReader {
+pub(crate) struct FrameReader {
     buffer: Vec<u8>,
     filled: usize,
     /// Total frame size once the header has been judged; `None` while the header is short.
@@ -116,7 +116,7 @@ struct FrameReader {
 }
 
 impl FrameReader {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         FrameReader {
             buffer: vec![0; max_frame_bytes()],
             filled: 0,
@@ -127,7 +127,7 @@ impl FrameReader {
     /// Pump bytes from `source` towards one whole frame. `Ok(None)` means the socket had no
     /// more to give; call again later. `Ok(Some(..))` hands over a complete frame's type and
     /// payload and resets for the next.
-    fn pump(&mut self, source: &mut impl Read) -> Result<Option<(u8, Vec<u8>)>, TransportError> {
+    pub(crate) fn pump(&mut self, source: &mut impl Read) -> Result<Option<(u8, Vec<u8>)>, TransportError> {
         loop {
             let target = match self.expecting {
                 Some(total) => total,
@@ -166,23 +166,28 @@ impl FrameReader {
 /// The coalesced outgoing buffer: everything queued since the last flush leaves in as few
 /// writes as the socket allows, and a partial write's remainder is carried, never dropped.
 #[derive(Debug)]
-struct WriteBuffer {
+pub(crate) struct WriteBuffer {
     pending: Vec<u8>,
     written: usize,
 }
 
 impl WriteBuffer {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         WriteBuffer { pending: Vec::new(), written: 0 }
     }
 
-    fn queue(&mut self, message: &Message) -> Result<(), EncodeError> {
+    pub(crate) fn queue(&mut self, message: &Message) -> Result<(), EncodeError> {
         encode(message, &mut self.pending)
+    }
+
+    /// Bytes staged and not yet written.
+    pub(crate) fn pending_bytes(&self) -> usize {
+        self.pending.len() - self.written
     }
 
     /// Push pending bytes into `sink`. `Ok(true)` means everything left; `Ok(false)` means the
     /// socket stopped accepting and the remainder is carried for the next flush.
-    fn flush_into(&mut self, sink: &mut impl Write) -> Result<bool, TransportError> {
+    pub(crate) fn flush_into(&mut self, sink: &mut impl Write) -> Result<bool, TransportError> {
         if self.pending.len() > WRITE_BUFFER_LIMIT_BYTES {
             return Err(TransportError::WriteBufferOverflow);
         }

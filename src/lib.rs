@@ -9,4 +9,5 @@
 pub mod abi;
 pub mod codec;
 pub mod protocol;
+pub mod recording;
 pub mod transport;
