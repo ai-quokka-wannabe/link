@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Every internal link and anchor is checked per pull request, the external ones weekly.**
+  Adopted from the owner's `altium-designer-mcp`: `lychee --offline --include-fragments` in
+  quick-checks, installed from its pinned release with a checksum rather than through a
+  third-party action, so a dead anchor is a red pull request; and `links.yml`, a scheduled
+  workflow that follows the external links too, never blocking a merge on a site elsewhere.
+- **The toolchain is pinned, the lock file is honoured, the docs must build clean, and main
+  caches the build.** Adopted from the owner's `altium-designer-mcp`: `rust-toolchain.toml`
+  pins rustc 1.95.0 with rustfmt and clippy, locally and in CI alike, so a new release never
+  turns a green build red on its own timetable; every cargo step runs `--locked`; `cargo doc
+  --document-private-items` runs with warnings as errors in quick-checks - and found two doc
+  links to private items at once; and main saves a cargo cache that pull requests restore.
 - **Nine findings of a bug hunt, fixed, the low and the cosmetic included.** The TCP connect
   itself is now bounded by the handshake timeout (`connect_timeout` per resolved address), as
   the header always claimed; a zero timeout is `LNK_BAD_ARGUMENT` at both ends instead of an
