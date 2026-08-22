@@ -42,7 +42,7 @@ extern "C"
 /*! Bumped whenever this table or its rules change. lnkGetClientVTable refuses any other
     number, so a consumer built against a stale copy of this header is told at load time
     rather than corrupted at call time. */
-#define LNK_CLIENT_ABI_VERSION 5u
+#define LNK_CLIENT_ABI_VERSION 6u
 
 /*
     Statuses. Zero is success and only success; everything else names its failure. No function
@@ -253,6 +253,25 @@ typedef struct LnkClientVTable {
     /*! Stop listening and free the server. Conversations already accepted from it live on;
         a NULL is ignored. */
     void (*close_server)(LnkServer* server);
+
+    /*! A client whose socket is a file, the writing half: open a recording at `path_utf8`. The
+        handle behaves as a server-held connection with no peer - every send_* stages a frame,
+        flush writes them all (a file never says "later"), poll always answers LNK_NOTHING_YET,
+        close writes BYE and closes the file. The header names this build's protocol fingerprint
+        and the world, tick and dt given here, exactly as a WELCOME would. Master Control feeds it
+        from the same per-subscriber loop as every citizen: the state log is what was said, in
+        the wire's own bytes, and a replay viewer is a spectator that opened it. */
+    LnkClient* (*record_open)(const char* path_utf8, uint64_t world_fingerprint, uint64_t start_tick, float nominal_dt_seconds, uint64_t start_unix_seconds,
+        LnkStatus* out_status, char* out_detail_utf8, uint32_t detail_capacity_bytes);
+
+    /*! A client whose socket is a file, the reading half: open a recording and judge its header
+        as a handshake is judged - another contract or another world is refused in the same words
+        a server uses. `out_welcome` is filled as a server would fill it: the start tick, the dt,
+        client id 0, the world. Then poll yields the recorded frames in order, send_* are refused
+        (LNK_BAD_ARGUMENT - a replay has nobody to talk to), and the end of the file answers
+        LNK_PEER_CLOSED: the recording is over. */
+    LnkClient* (*replay_open)(const char* path_utf8, uint64_t world_fingerprint, LnkWelcome* out_welcome, LnkStatus* out_status, char* out_detail_utf8,
+        uint32_t detail_capacity_bytes);
 } LnkClientVTable;
 
 /*! The library's one exported symbol. Returns the table when it can satisfy `abi_version`,

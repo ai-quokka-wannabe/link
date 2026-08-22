@@ -19,11 +19,71 @@ use crate::protocol::{
     Actions, CONTACTS_MAX, Contact, CreatureState, Derez, Event, Hello, MessageType, PROTOCOL_VERSION, Ping, Pong, Proprioception, REZ_MAX_MATERIALS, REZ_MAX_TRIANGLES,
     REZ_MAX_VERTICES, Rez, RezMaterial, RezTriangle, RezVertex, Role, TickStateHeader, Welcome, WorldDefinition, world_fingerprint,
 };
+use crate::recording::{Recorder, Replayer};
 use crate::transport::{Connection, Listener, TransportError, connect, listen, local_hello, recorded_fingerprint};
+
+/// What a client handle stands on: a socket, or a file in either direction.
+enum End {
+    Wire(Connection),
+    Recording(Recorder),
+    Replay(Replayer),
+}
+
+impl End {
+    fn poll(&mut self) -> Result<Option<Message>, TransportError> {
+        match self {
+            End::Wire(connection) => connection.poll(),
+            End::Recording(_) => Ok(None),
+            End::Replay(replay) => replay.poll(),
+        }
+    }
+
+    fn queue(&mut self, message: &Message) -> Result<(), crate::codec::EncodeError> {
+        match self {
+            End::Wire(connection) => connection.queue(message),
+            End::Recording(recorder) => recorder.queue(message),
+            // A replay has nobody to talk to; the refusal is the ABI's (LNK_BAD_ARGUMENT), and
+            // the codec error here is only the shape the caller expects.
+            End::Replay(_) => Err(crate::codec::EncodeError::ReservedNotZero),
+        }
+    }
+
+    fn flush(&mut self) -> Result<bool, TransportError> {
+        match self {
+            End::Wire(connection) => connection.flush(),
+            End::Recording(recorder) => recorder.flush(),
+            End::Replay(_) => Ok(true),
+        }
+    }
+
+    fn may_send_intents(&self) -> bool {
+        match self {
+            End::Wire(connection) => connection.may_send_intents(),
+            End::Recording(_) => true,
+            End::Replay(_) => false,
+        }
+    }
+
+    fn may_send_proprioception(&self) -> bool {
+        match self {
+            End::Wire(connection) => connection.may_send_proprioception(),
+            End::Recording(_) => true,
+            End::Replay(_) => false,
+        }
+    }
+
+    fn close(self) {
+        match self {
+            End::Wire(connection) => connection.close(),
+            End::Recording(recorder) => recorder.close(),
+            End::Replay(_) => {}
+        }
+    }
+}
 
 /// `LNK_CLIENT_ABI_VERSION`: bumped whenever the vtable or its rules change. The twin lives in
 /// `lnk_client.h`, and a test holds the two together.
-pub const LNK_CLIENT_ABI_VERSION: u32 = 5;
+pub const LNK_CLIENT_ABI_VERSION: u32 = 6;
 
 pub type LnkStatus = i32;
 
@@ -46,7 +106,7 @@ pub struct LnkClient {
 }
 
 struct ClientInner {
-    connection: Connection,
+    end: End,
     /// The rows the last TICK_STATE view borrows from. Replaced on the next TICK_STATE, freed
     /// on close — exactly the lifetime the header promises the C side.
     tick_rows: Vec<CreatureState>,
@@ -165,6 +225,24 @@ pub struct LnkClientVTable {
     pub send_derez: extern "C" fn(connection: *mut LnkClient, derez: *const Derez) -> LnkStatus,
     pub send_proprioception: extern "C" fn(connection: *mut LnkClient, proprioception: *const Proprioception, contacts: *const Contact) -> LnkStatus,
     pub close_server: extern "C" fn(server: *mut LnkServer),
+    pub record_open: extern "C" fn(
+        path_utf8: *const c_char,
+        world_fingerprint: u64,
+        start_tick: u64,
+        nominal_dt_seconds: f32,
+        start_unix_seconds: u64,
+        out_status: *mut LnkStatus,
+        out_detail_utf8: *mut c_char,
+        detail_capacity_bytes: u32,
+    ) -> *mut LnkClient,
+    pub replay_open: extern "C" fn(
+        path_utf8: *const c_char,
+        world_fingerprint: u64,
+        out_welcome: *mut Welcome,
+        out_status: *mut LnkStatus,
+        out_detail_utf8: *mut c_char,
+        detail_capacity_bytes: u32,
+    ) -> *mut LnkClient,
 }
 
 static VTABLE: LnkClientVTable = LnkClientVTable {
@@ -190,6 +268,8 @@ static VTABLE: LnkClientVTable = LnkClientVTable {
     send_derez: send_derez_impl,
     send_proprioception: send_proprioception_impl,
     close_server: close_server_impl,
+    record_open: record_open_impl,
+    replay_open: replay_open_impl,
 };
 
 /// The library's one exported symbol. Kept camel-case to match the header and the flagship's
@@ -332,15 +412,7 @@ extern "C" fn connect_impl(
                     *out_welcome = welcome;
                     *out_status = LNK_OK;
                 }
-                Box::into_raw(Box::new(ClientInner {
-                    connection,
-                    tick_rows: Vec::new(),
-                    rez_vertices: Vec::new(),
-                    rez_triangles: Vec::new(),
-                    rez_materials: Vec::new(),
-                    contacts: Vec::new(),
-                }))
-                .cast::<LnkClient>()
+                handle_for(End::Wire(connection))
             }
             Err(error) => refuse(status_of(&error), &detail_of(&error)),
         }
@@ -366,7 +438,7 @@ extern "C" fn poll_impl(client: *mut LnkClient, out_message: *mut MessageView) -
         // SAFETY: non-null was just checked; validity is the header's stated contract.
         let inner = unsafe { inner_of(client) };
 
-        let message = match inner.connection.poll() {
+        let message = match inner.end.poll() {
             Ok(None) => return LNK_NOTHING_YET,
             Ok(Some(message)) => message,
             Err(error) => return status_of(&error),
@@ -444,7 +516,7 @@ fn queue_on(client: *mut LnkClient, message: &Message) -> LnkStatus {
     }
     // SAFETY: non-null was just checked; validity is the header's stated contract.
     let inner = unsafe { inner_of(client) };
-    match inner.connection.queue(message) {
+    match inner.end.queue(message) {
         Ok(()) => LNK_OK,
         Err(_) => LNK_BAD_ARGUMENT,
     }
@@ -457,14 +529,14 @@ extern "C" fn send_actions_impl(client: *mut LnkClient, actions: *const Actions)
         }
         // SAFETY: non-null was just checked; validity is the header's stated contract.
         let inner = unsafe { inner_of(client) };
-        if !inner.connection.may_send_intents() {
+        if !inner.end.may_send_intents() {
             // A spectator never sends ACTIONS, and the refusal starts at the sending half so an
             // honest client cannot even stage the violation the server end would hang up on.
             return LNK_BAD_ARGUMENT;
         }
         // SAFETY: non-null was just checked; Actions is plain old data, read by copy.
         let actions = unsafe { *actions };
-        match inner.connection.queue(&Message::Actions(actions)) {
+        match inner.end.queue(&Message::Actions(actions)) {
             Ok(()) => LNK_OK,
             Err(_) => LNK_BAD_ARGUMENT,
         }
@@ -484,7 +556,7 @@ extern "C" fn send_rez_impl(
         }
         // SAFETY: non-null was just checked; validity is the header's stated contract.
         let inner = unsafe { inner_of(client) };
-        if !inner.connection.may_send_intents() {
+        if !inner.end.may_send_intents() {
             // A spectator never sends REZ either: the same refusal, at the same sending half.
             return LNK_BAD_ARGUMENT;
         }
@@ -519,7 +591,7 @@ extern "C" fn send_rez_impl(
         };
         // The codec judges the rest - indices in range, floats finite - and a refusal there is
         // the caller's bad argument, not a wire failure.
-        match inner.connection.queue(&message) {
+        match inner.end.queue(&message) {
             Ok(()) => LNK_OK,
             Err(_) => LNK_BAD_ARGUMENT,
         }
@@ -541,7 +613,7 @@ extern "C" fn flush_impl(client: *mut LnkClient, out_everything_left: *mut u8) -
         }
         // SAFETY: non-null was just checked; validity is the header's stated contract.
         let inner = unsafe { inner_of(client) };
-        match inner.connection.flush() {
+        match inner.end.flush() {
             Ok(done) => {
                 // SAFETY: out_everything_left was checked non-null.
                 unsafe { *out_everything_left = u8::from(done) };
@@ -644,15 +716,7 @@ extern "C" fn accept_impl(
                     *out_hello = hello;
                     *out_status = LNK_OK;
                 }
-                Box::into_raw(Box::new(ClientInner {
-                    connection,
-                    tick_rows: Vec::new(),
-                    rez_vertices: Vec::new(),
-                    rez_triangles: Vec::new(),
-                    rez_materials: Vec::new(),
-                    contacts: Vec::new(),
-                }))
-                .cast::<LnkClient>()
+                handle_for(End::Wire(connection))
             }
             Err(error) => refuse(status_of(&error), &detail_of(&error)),
         }
@@ -727,7 +791,7 @@ extern "C" fn send_proprioception_impl(connection: *mut LnkClient, proprioceptio
         }
         // SAFETY: non-null was just checked; validity is the header's stated contract.
         let inner = unsafe { inner_of(connection) };
-        if !inner.connection.may_send_proprioception() {
+        if !inner.end.may_send_proprioception() {
             // The letter flows one way: a client-held connection never sends it, and the refusal
             // starts at the sending half, exactly as the spectator's does.
             return LNK_BAD_ARGUMENT;
@@ -747,9 +811,121 @@ extern "C" fn send_proprioception_impl(connection: *mut LnkClient, proprioceptio
             // count was capped above.
             unsafe { std::slice::from_raw_parts(contacts, header.contact_count as usize) }.to_vec()
         };
-        match inner.connection.queue(&Message::Proprioception { header, contacts: rows }) {
+        match inner.end.queue(&Message::Proprioception { header, contacts: rows }) {
             Ok(()) => LNK_OK,
             Err(_) => LNK_BAD_ARGUMENT,
+        }
+    })
+}
+
+/// A fresh handle around an end, with empty row storage.
+fn handle_for(end: End) -> *mut LnkClient {
+    Box::into_raw(Box::new(ClientInner {
+        end,
+        tick_rows: Vec::new(),
+        rez_vertices: Vec::new(),
+        rez_triangles: Vec::new(),
+        rez_materials: Vec::new(),
+        contacts: Vec::new(),
+    }))
+    .cast::<LnkClient>()
+}
+
+/// The path argument, as every path-taking entry reads it: NUL-terminated UTF-8, or refused.
+///
+/// # Safety
+///
+/// `path_utf8` must be null or point at a NUL-terminated string, per the header's contract.
+unsafe fn path_of<'a>(path_utf8: *const c_char) -> Result<&'a str, &'static str> {
+    if path_utf8.is_null() {
+        return Err("link: a null pointer is not a path");
+    }
+    // SAFETY: the caller promised a NUL-terminated string; from_ptr reads to the NUL.
+    unsafe { CStr::from_ptr(path_utf8) }.to_str().map_err(|_| "link: the path is not UTF-8")
+}
+
+extern "C" fn record_open_impl(
+    path_utf8: *const c_char,
+    world_fingerprint: u64,
+    start_tick: u64,
+    nominal_dt_seconds: f32,
+    start_unix_seconds: u64,
+    out_status: *mut LnkStatus,
+    out_detail_utf8: *mut c_char,
+    detail_capacity_bytes: u32,
+) -> *mut LnkClient {
+    guarded(std::ptr::null_mut(), || {
+        if out_status.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: out_status was just checked non-null; pre-set the panic verdict.
+        unsafe { *out_status = LNK_PANIC };
+        let refuse = |status: LnkStatus, detail: &str| -> *mut LnkClient {
+            // SAFETY: as above.
+            unsafe { *out_status = status };
+            write_detail(out_detail_utf8, detail_capacity_bytes, detail);
+            std::ptr::null_mut()
+        };
+        // SAFETY: the header's contract for path_utf8.
+        let path = match unsafe { path_of(path_utf8) } {
+            Ok(path) => path,
+            Err(words) => return refuse(LNK_BAD_ARGUMENT, words),
+        };
+        match Recorder::create(std::path::Path::new(path), world_fingerprint, start_tick, nominal_dt_seconds, start_unix_seconds) {
+            Ok(recorder) => {
+                // SAFETY: as above.
+                unsafe { *out_status = LNK_OK };
+                handle_for(End::Recording(recorder))
+            }
+            Err(error) => refuse(status_of(&error), &detail_of(&error)),
+        }
+    })
+}
+
+extern "C" fn replay_open_impl(
+    path_utf8: *const c_char,
+    world_fingerprint: u64,
+    out_welcome: *mut Welcome,
+    out_status: *mut LnkStatus,
+    out_detail_utf8: *mut c_char,
+    detail_capacity_bytes: u32,
+) -> *mut LnkClient {
+    guarded(std::ptr::null_mut(), || {
+        if out_status.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: out_status was just checked non-null; pre-set the panic verdict.
+        unsafe { *out_status = LNK_PANIC };
+        let refuse = |status: LnkStatus, detail: &str| -> *mut LnkClient {
+            // SAFETY: as above.
+            unsafe { *out_status = status };
+            write_detail(out_detail_utf8, detail_capacity_bytes, detail);
+            std::ptr::null_mut()
+        };
+        if out_welcome.is_null() {
+            return refuse(LNK_BAD_ARGUMENT, "link: a null pointer is not an argument");
+        }
+        // SAFETY: the header's contract for path_utf8.
+        let path = match unsafe { path_of(path_utf8) } {
+            Ok(path) => path,
+            Err(words) => return refuse(LNK_BAD_ARGUMENT, words),
+        };
+        match Replayer::open(std::path::Path::new(path), world_fingerprint) {
+            Ok(replay) => {
+                let header = *replay.header();
+                // SAFETY: out_welcome was checked non-null; Welcome is plain old data.
+                unsafe {
+                    *out_welcome = Welcome {
+                        current_tick: header.start_tick,
+                        nominal_dt_seconds: header.nominal_dt_seconds,
+                        client_id: 0,
+                        world_fingerprint: header.world_fingerprint,
+                    };
+                    *out_status = LNK_OK;
+                }
+                handle_for(End::Replay(replay))
+            }
+            Err(error) => refuse(status_of(&error), &detail_of(&error)),
         }
     })
 }
@@ -773,7 +949,7 @@ extern "C" fn close_impl(client: *mut LnkClient) {
         // SAFETY: the header's contract - a pointer from connect, not yet closed - and from
         // here the box owns it again, so it is freed exactly once.
         let inner = unsafe { Box::from_raw(client.cast::<ClientInner>()) };
-        inner.connection.close();
+        inner.end.close();
     });
 }
 
@@ -1655,6 +1831,95 @@ mod tests {
             "the client hears which world it was refused by, got: {client_words}"
         );
         (table.close_server)(server);
+    }
+
+    #[test]
+    fn a_disk_written_through_the_table_replays_through_it_and_refuses_what_a_server_would() {
+        let table = vtable();
+        let mut path = std::env::temp_dir();
+        path.push(format!("link-abi-disk-{}.disk", std::process::id()));
+        let c_path = CString::new(path.to_string_lossy().to_string()).expect("path");
+
+        let mut status: LnkStatus = -1;
+        let disk = (table.record_open)(c_path.as_ptr(), WORLD, 500, 0.031_25, 1_700_000_000, &raw mut status, std::ptr::null_mut(), 0);
+        assert_eq!(status, LNK_OK);
+        assert!(!disk.is_null());
+
+        // A recording is a server-held end: the world's messages stage, poll hears nothing.
+        let rows = [CreatureState {
+            creature_id: 7,
+            position: [1.0, 2.0, 3.0],
+            yaw: 0.5,
+            velocity: [0.0; 3],
+            yaw_rate: 0.0,
+            vocalisation: 0.0,
+        }];
+        let header = TickStateHeader {
+            tick: 501,
+            creature_count: 1,
+            reserved0: [0; 4],
+        };
+        assert_eq!((table.send_tick_state)(disk, &raw const header, rows.as_ptr()), LNK_OK);
+        let letter = Proprioception {
+            tick: 501,
+            creature_id: 7,
+            grounded: 1,
+            reserved0: [0; 3],
+            specific_force: [0.0, 9.81, 0.0],
+            contact_count: 0,
+        };
+        assert_eq!((table.send_proprioception)(disk, &raw const letter, std::ptr::null()), LNK_OK);
+        let mut view = unsafe { std::mem::zeroed::<MessageView>() };
+        assert_eq!((table.poll)(disk, &raw mut view), LNK_NOTHING_YET);
+        let mut everything_left = 0u8;
+        assert_eq!((table.flush)(disk, &raw mut everything_left), LNK_OK);
+        assert_eq!(everything_left, 1, "a file never says later");
+        (table.close)(disk);
+
+        // Another world is refused in words; the right world opens with a WELCOME-shaped start.
+        let mut welcome = unsafe { std::mem::zeroed::<Welcome>() };
+        let mut detail = [0i8; 256];
+        let wrong = (table.replay_open)(
+            c_path.as_ptr(),
+            WORLD + 1,
+            &raw mut welcome,
+            &raw mut status,
+            detail.as_mut_ptr().cast::<c_char>(),
+            detail.len() as u32,
+        );
+        assert!(wrong.is_null());
+        assert_eq!(status, LNK_REFUSED);
+        let words = unsafe { CStr::from_ptr(detail.as_ptr().cast::<c_char>()) }.to_string_lossy().to_string();
+        assert!(words.contains("different world"), "{words}");
+
+        let replay = (table.replay_open)(c_path.as_ptr(), WORLD, &raw mut welcome, &raw mut status, std::ptr::null_mut(), 0);
+        assert_eq!(status, LNK_OK);
+        assert_eq!(welcome.current_tick, 500);
+        assert_eq!(welcome.world_fingerprint, WORLD);
+        assert_eq!(welcome.client_id, 0);
+
+        // A replay has nobody to talk to.
+        assert_eq!((table.send_ping)(replay, 1), LNK_BAD_ARGUMENT);
+        assert_eq!((table.send_tick_state)(replay, &raw const header, rows.as_ptr()), LNK_BAD_ARGUMENT);
+
+        // What was said, in order, then the farewell, then the end.
+        assert_eq!((table.poll)(replay, &raw mut view), LNK_OK);
+        assert_eq!(view.message_type, MessageType::TickState as u8);
+        // SAFETY: the type byte names the union member.
+        assert_eq!(unsafe { (*view.payload.tick_state.states).creature_id }, 7);
+        assert_eq!((table.poll)(replay, &raw mut view), LNK_OK);
+        assert_eq!(view.message_type, MessageType::Proprioception as u8);
+        assert_eq!((table.poll)(replay, &raw mut view), LNK_OK);
+        assert_eq!(view.message_type, MessageType::Bye as u8);
+        assert_eq!((table.poll)(replay, &raw mut view), LNK_PEER_CLOSED, "the end of the Disk is the world closing");
+        (table.close)(replay);
+
+        // Nulls are refused, never dereferenced.
+        assert!((table.record_open)(std::ptr::null(), WORLD, 0, 0.0, 0, &raw mut status, std::ptr::null_mut(), 0).is_null());
+        assert_eq!(status, LNK_BAD_ARGUMENT);
+        assert!((table.replay_open)(c_path.as_ptr(), WORLD, std::ptr::null_mut(), &raw mut status, std::ptr::null_mut(), 0).is_null());
+        assert_eq!(status, LNK_BAD_ARGUMENT);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
