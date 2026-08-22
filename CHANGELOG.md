@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The letter speaks body frame - the header now says so.** `LnkProprioception`'s specific
+  force and `LnkContact`'s position and impulse were documented as world space; the physics
+  produces them in the body frame, exactly as the Program ABI's `TglSenses` and `TglContact`
+  hand them to a brain, and that is what Master Control relays. Words only - no byte moved -
+  so the fingerprint is re-recorded at version 5 rather than bumped.
 - **An orderly release: `close` lets the farewell land.** `close` used to send `BYE` and slam
   both halves of the socket. A peer with a tick in flight then answered that tick with a TCP
   reset, and a reset discards the peer's unread receive buffer - `BYE` included - so a polite
