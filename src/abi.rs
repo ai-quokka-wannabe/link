@@ -99,7 +99,7 @@ pub const LNK_BAD_ARGUMENT: LnkStatus = 8;
 pub const LNK_PANIC: LnkStatus = 9;
 
 /// The opaque handle the C side holds. Never constructed as itself: it is the public face of a
-/// pointer to [`ClientInner`], and only the casts below relate the two.
+/// pointer to `ClientInner` (private to this module), and only the casts below relate the two.
 #[repr(C)]
 pub struct LnkClient {
     _opaque: [u8; 0],
@@ -130,7 +130,7 @@ struct ServerInner {
     world_fingerprint: u64,
 }
 
-/// `LnkTickStateView`: the header by value, the rows by borrow from [`ClientInner::tick_rows`].
+/// `LnkTickStateView`: the header by value, the rows by borrow from the private `ClientInner::tick_rows`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TickStateView {
