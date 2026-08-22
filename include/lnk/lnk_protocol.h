@@ -49,7 +49,7 @@ extern "C"
     carries the header's fingerprint rather than this number, so two ends disagreeing about the
     bytes are refused even when they agree about the number; the number exists for the
     human-readable refusal. */
-#define LNK_PROTOCOL_VERSION 4u
+#define LNK_PROTOCOL_VERSION 5u
 
 /*! The port Master Control listens on when nobody names another - a default and only a
     default: the client's positional argument carries any host and port, and Master Control
@@ -119,6 +119,7 @@ extern "C"
 #define LNK_MSG_PING 8u
 #define LNK_MSG_PONG 9u
 #define LNK_MSG_BYE 10u
+#define LNK_MSG_PROPRIOCEPTION 11u
 
 /*! What a client is, stated in HELLO. Zero is invalid. A spectator never sends ACTIONS or REZ,
     and the refusal is enforced inside this library on both ends - the sending half refuses to
@@ -314,6 +315,35 @@ typedef struct LnkEvent {
     uint8_t reserved0[3];   /*!< Always zero. Named so the asserts can count it. */
 } LnkEvent;
 
+/*! The most contacts a PROPRIOCEPTION carries - and the most a body may declare in its REZ's
+    max_contact_count, since the letter must be able to carry every contact the body feels. */
+#define LNK_CONTACTS_MAX 16u
+
+/*! One contact a body felt this tick: where, and the impulse the world delivered there. The
+    exact-contacts etape grows this into a point on the body, a world normal, a depth and a slip
+    velocity; today it is what the ported physics produces. Twenty-four bytes. */
+typedef struct LnkContact {
+    float position[3];  /*!< Metres, world space. */
+    float impulse[3];   /*!< Newton-seconds, world space. */
+} LnkContact;
+
+/*! PROPRIOCEPTION, server to the one host that owns the creature - a letter, not a broadcast
+    (TOPOLOGY.md § The protocol, ruled 2026-08-22). Sent every tick after that tick's TICK_STATE,
+    it carries what a spectator has no use for and a brain cannot do without: the specific force
+    the body's otolith reads, whether the feet are on the ground, and the tick's contacts as
+    contact_count LnkContact rows that follow this header in the same frame. A spectator never
+    receives it; a server never receives it - this library's server half treats the frame
+    arriving at the server as the same protocol violation as ACTIONS from a spectator, and the
+    sending half refuses to stage it on a client-held connection. Thirty-two bytes. */
+typedef struct LnkProprioception {
+    uint64_t tick;
+    uint32_t creature_id;
+    uint8_t grounded;           /*!< 1 when the feet touch the ground this tick, else 0. */
+    uint8_t reserved0[3];       /*!< Always zero. Named so the asserts can count it. */
+    float specific_force[3];    /*!< Metres per second squared, world space - what an otolith reads. */
+    uint32_t contact_count;     /*!< Rows that follow, at most LNK_CONTACTS_MAX. */
+} LnkProprioception;
+
 /*! DEREZ, server to every client: the creature leaves the world at this tick. A leave is a
     broadcast and nothing else - late arrival is not a special case, and neither is departure. */
 typedef struct LnkDerez {
@@ -419,6 +449,17 @@ LNK_STATIC_ASSERT(sizeof(LnkActions) == 40u,
                   "LnkActions must be 40 bytes: tick, id, TglActions' twelve, the previous tick's twelve resent, and a counted reserved word.");
 LNK_STATIC_ASSERT(sizeof(LnkEvent) == 32u, "LnkEvent must be 32 bytes: tick, place, strength, cause, kind.");
 LNK_STATIC_ASSERT(sizeof(LnkDerez) == 16u, "LnkDerez must be 16 bytes: tick, id, reserved.");
+LNK_STATIC_ASSERT(sizeof(LnkContact) == 24u, "LnkContact must be 24 bytes: position, impulse.");
+LNK_STATIC_ASSERT(sizeof(LnkProprioception) == 32u, "LnkProprioception must be 32 bytes: tick, id, grounded, reserved, force, count.");
+LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkContact, position) + LNK_MEMBER_BYTES(LnkContact, impulse) == sizeof(LnkContact),
+                  "LnkContact has padding: a member changed width.");
+LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkProprioception, tick) + LNK_MEMBER_BYTES(LnkProprioception, creature_id) + LNK_MEMBER_BYTES(LnkProprioception, grounded)
+                          + LNK_MEMBER_BYTES(LnkProprioception, reserved0) + LNK_MEMBER_BYTES(LnkProprioception, specific_force)
+                          + LNK_MEMBER_BYTES(LnkProprioception, contact_count)
+                      == sizeof(LnkProprioception),
+                  "LnkProprioception has padding: a member changed width.");
+LNK_STATIC_ASSERT(sizeof(LnkProprioception) + LNK_CONTACTS_MAX * sizeof(LnkContact) <= 65535u,
+                  "A full PROPRIOCEPTION must fit one frame.");
 LNK_STATIC_ASSERT(sizeof(LnkPing) == 8u && sizeof(LnkPong) == 8u, "LnkPing and LnkPong must be 8 bytes: the nonce.");
 
 LNK_STATIC_ASSERT(sizeof(LnkTickStateHeader) + LNK_TICK_STATE_MAX_CREATURES * sizeof(LnkCreatureState) <= LNK_FRAME_PAYLOAD_LIMIT,

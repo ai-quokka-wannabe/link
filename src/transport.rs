@@ -44,6 +44,9 @@ pub enum TransportError {
     /// library enforces itself, on the server end, so the rule cannot drift between consumers.
     /// The connection is shut before this is returned.
     ActionsFromSpectator,
+    /// A PROPRIOCEPTION frame arrived at the server: the letter flows one way only, and a
+    /// client that sends one is violating the protocol. The connection is shut first.
+    ProprioceptionAtServer,
     /// The outgoing buffer passed [`WRITE_BUFFER_LIMIT_BYTES`] — the peer is not reading, and
     /// an unbounded buffer would be an allocation the peer controls. The connection is over.
     WriteBufferOverflow,
@@ -205,10 +208,13 @@ pub struct Connection {
     /// True on a client-held connection that introduced itself as a spectator: the sending
     /// half's mirror of the same rule, enforced at the ABI's `send_actions`.
     forbid_outgoing_actions: bool,
+    /// True on a server-held connection: the one end that may send PROPRIOCEPTION, and the one
+    /// end that must never receive it.
+    server_held: bool,
 }
 
 impl Connection {
-    fn framed(stream: TcpStream, forbid_incoming_actions: bool, forbid_outgoing_actions: bool) -> Result<Self, TransportError> {
+    fn framed(stream: TcpStream, forbid_incoming_actions: bool, forbid_outgoing_actions: bool, server_held: bool) -> Result<Self, TransportError> {
         stream.set_read_timeout(None)?;
         stream.set_write_timeout(None)?;
         stream.set_nonblocking(true)?;
@@ -218,7 +224,14 @@ impl Connection {
             writer: WriteBuffer::new(),
             forbid_incoming_actions,
             forbid_outgoing_actions,
+            server_held,
         })
+    }
+
+    /// Whether this end may send PROPRIOCEPTION: only a server-held connection.
+    #[must_use]
+    pub fn may_send_proprioception(&self) -> bool {
+        self.server_held
     }
 
     /// False exactly when this end introduced itself as a spectator: a spectator never sends
@@ -239,6 +252,10 @@ impl Connection {
                 if matches!(message, Message::Actions(_) | Message::Rez { .. }) && self.forbid_incoming_actions {
                     let _ = self.stream.shutdown(Shutdown::Both);
                     return Err(TransportError::ActionsFromSpectator);
+                }
+                if matches!(message, Message::Proprioception { .. }) && self.server_held {
+                    let _ = self.stream.shutdown(Shutdown::Both);
+                    return Err(TransportError::ProprioceptionAtServer);
                 }
                 Ok(Some(message))
             }
@@ -349,7 +366,7 @@ pub fn connect<A: ToSocketAddrs>(address: A, hello: &Hello, timeout: Duration) -
         });
     }
 
-    Ok((Connection::framed(stream, false, hello.role == Role::Spectator as u8)?, welcome))
+    Ok((Connection::framed(stream, false, hello.role == Role::Spectator as u8, false)?, welcome))
 }
 
 fn read_answer(stream: &mut TcpStream, header: &mut [u8; FRAME_HEADER_BYTES]) -> Result<(), TransportError> {
@@ -426,7 +443,7 @@ pub fn accept(stream: TcpStream, timeout: Duration, world_fingerprint: u64) -> R
         ));
     }
 
-    Ok((Connection::framed(stream, hello.role == Role::Spectator as u8, false)?, hello))
+    Ok((Connection::framed(stream, hello.role == Role::Spectator as u8, false, true)?, hello))
 }
 
 /// The listening half: Master Control's socket, or a test playing Master Control's part.
@@ -466,7 +483,7 @@ impl Listener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Actions, Rez, TICK_STATE_MAX_CREATURES};
+    use crate::protocol::{Actions, Proprioception, Rez, TICK_STATE_MAX_CREATURES};
     use std::net::TcpListener;
 
     const PATIENCE: Duration = Duration::from_secs(5);
@@ -716,6 +733,59 @@ mod tests {
         assert!(
             matches!(verdict, Err(TransportError::ActionsFromSpectator)),
             "a spectator's REZ must end the connection like its ACTIONS would, got {verdict:?}"
+        );
+        drop(client.join().expect("client thread"));
+    }
+
+    #[test]
+    fn proprioception_flows_one_way_only() {
+        let (listener, address) = loopback();
+        let letter = Message::Proprioception {
+            header: Proprioception {
+                tick: 1,
+                creature_id: 1,
+                grounded: 1,
+                reserved0: [0; 3],
+                specific_force: [0.0, 9.81, 0.0],
+                contact_count: 0,
+            },
+            contacts: Vec::new(),
+        };
+        let client_letter = letter.clone();
+        let client = std::thread::spawn(move || {
+            let (mut connection, _) = connect(address, &local_hello(Role::CreatureHost, WORLD), PATIENCE).expect("handshake");
+            assert!(!connection.may_send_proprioception(), "a client-held connection never sends the letter");
+            // Beneath the ABI's refusal, the transport still carries it - and the server hangs up.
+            connection.queue(&client_letter).expect("the codec itself does not know ends");
+            loop {
+                match connection.flush() {
+                    Ok(true) | Err(_) => break,
+                    Ok(false) => {}
+                }
+            }
+            connection
+        });
+
+        let (stream, _) = listener.accept().expect("accept");
+        let (mut server_side, _) = accept(stream, PATIENCE, WORLD).expect("handshake");
+        assert!(server_side.may_send_proprioception(), "the server-held end is the one that may");
+        server_side.queue(&welcome()).expect("queue welcome");
+        server_side.queue(&letter).expect("queue the letter");
+        while !server_side.flush().expect("flush") {}
+
+        let deadline = std::time::Instant::now() + PATIENCE;
+        let verdict = loop {
+            match server_side.poll() {
+                Ok(None) => {
+                    assert!(std::time::Instant::now() < deadline, "the violation never arrived");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                other => break other,
+            }
+        };
+        assert!(
+            matches!(verdict, Err(TransportError::ProprioceptionAtServer)),
+            "a letter arriving at the server ends the connection, got {verdict:?}"
         );
         drop(client.join().expect("client thread"));
     }

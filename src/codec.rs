@@ -12,8 +12,8 @@
 //! [`decode`]. The codec never panics on any input; every failure is a named [`DecodeError`].
 
 use crate::protocol::{
-    Actions, CreatureState, Derez, Event, EventKind, FRAME_HEADER_BYTES, Hello, MessageType, Ping, Pong, REZ_MAX_MATERIALS, REZ_MAX_TRIANGLES, REZ_MAX_VERTICES, Rez,
-    RezMaterial, RezTriangle, RezVertex, Role, TICK_STATE_MAX_CREATURES, TickStateHeader, Welcome,
+    Actions, CONTACTS_MAX, Contact, CreatureState, Derez, Event, EventKind, FRAME_HEADER_BYTES, Hello, MessageType, Ping, Pong, Proprioception, REZ_MAX_MATERIALS,
+    REZ_MAX_TRIANGLES, REZ_MAX_VERTICES, Rez, RezMaterial, RezTriangle, RezVertex, Role, TICK_STATE_MAX_CREATURES, TickStateHeader, Welcome,
 };
 
 /// A decoded message, owning its payload. TICK_STATE's rows live in a `Vec` sized only after
@@ -36,6 +36,11 @@ pub enum Message {
     Actions(Actions),
     Event(Event),
     Derez(Derez),
+    /// The owner's letter: the body's feel this tick, contacts copied out.
+    Proprioception {
+        header: Proprioception,
+        contacts: Vec<Contact>,
+    },
     Ping(Ping),
     Pong(Pong),
     Bye,
@@ -49,13 +54,38 @@ pub enum DecodeError {
     /// payload undefined, so an end that receives one refuses it as unknown.
     UnknownOrReservedType(u8),
     /// The payload length does not match what the type demands.
-    WrongLength { expected: usize, got: usize },
+    WrongLength {
+        expected: usize,
+        got: usize,
+    },
     /// A TICK_STATE length that cannot be a header plus whole rows.
-    RaggedTickState { got: usize },
+    RaggedTickState {
+        got: usize,
+    },
     /// A TICK_STATE whose row count exceeds the cap.
-    CountOverCap { count: u32 },
+    CountOverCap {
+        count: u32,
+    },
     /// A TICK_STATE whose declared count disagrees with its length.
-    CountLengthMismatch { count: u32, rows_by_length: usize },
+    CountLengthMismatch {
+        count: u32,
+        rows_by_length: usize,
+    },
+    /// A PROPRIOCEPTION length that cannot be a header plus whole contacts, or more contacts
+    /// than the cap, or a count disagreeing with the length.
+    RaggedProprioception {
+        got: usize,
+    },
+    ContactsOverCap {
+        count: u32,
+    },
+    ContactsLengthMismatch {
+        count: u32,
+        rows_by_length: usize,
+    },
+    /// A grounded byte that is neither 0 nor 1, or a force or contact that is not finite.
+    InvalidGrounded(u8),
+    ProprioceptionNotFinite,
     /// A role byte that is neither spectator nor creature host.
     InvalidRole(u8),
     /// An event kind byte no v1 end emits.
@@ -65,11 +95,20 @@ pub enum DecodeError {
     ReservedNotZero,
     /// A REZ count beyond its cap — refused before any row is read, because the one
     /// variable-size client input is exactly where parsers die.
-    RezCountOverCap { vertices: u32, triangles: u32, materials: u32 },
+    RezCountOverCap {
+        vertices: u32,
+        triangles: u32,
+        materials: u32,
+    },
     /// A REZ whose declared counts do not sum to its frame length.
-    RezLengthMismatch { expected: usize, got: usize },
+    RezLengthMismatch {
+        expected: usize,
+        got: usize,
+    },
     /// A triangle naming a vertex or material that does not exist.
-    RezIndexOutOfRange { triangle: u32 },
+    RezIndexOutOfRange {
+        triangle: u32,
+    },
     /// A REZ float that is not a real number. A NaN vertex entering a hierarchy poisons a
     /// traversal that fails somewhere else entirely, so it never crosses the wire.
     RezNotFinite,
@@ -101,6 +140,16 @@ pub enum EncodeError {
         triangle: u32,
     },
     RezNotFinite,
+    /// The PROPRIOCEPTION refusals, sending side.
+    ContactsOverCap {
+        count: usize,
+    },
+    ContactsRowsMismatch {
+        count: u32,
+        rows: usize,
+    },
+    InvalidGrounded(u8),
+    ProprioceptionNotFinite,
 }
 
 /// What a type byte's payload may look like, answerable from the three header bytes alone —
@@ -114,7 +163,12 @@ pub enum PayloadRule {
     /// REZ: at least its header, at most a maximal body; the counts inside the header then
     /// judge the exact sum before any row is copied.
     Rez,
+    /// PROPRIOCEPTION: `header + contacts * row` with `contacts <= CONTACTS_MAX`.
+    Proprioception,
 }
+
+const PROPRIOCEPTION_HEADER_BYTES: usize = size_of::<Proprioception>();
+const CONTACT_BYTES: usize = size_of::<Contact>();
 
 const TICK_HEADER_BYTES: usize = size_of::<TickStateHeader>();
 const CREATURE_STATE_BYTES: usize = size_of::<CreatureState>();
@@ -158,6 +212,7 @@ pub const fn payload_rule(type_byte: u8) -> Result<PayloadRule, DecodeError> {
         t if t == MessageType::Ping as u8 => Ok(PayloadRule::Exact(size_of::<Ping>())),
         t if t == MessageType::Pong as u8 => Ok(PayloadRule::Exact(size_of::<Pong>())),
         t if t == MessageType::Bye as u8 => Ok(PayloadRule::Exact(0)),
+        t if t == MessageType::Proprioception as u8 => Ok(PayloadRule::Proprioception),
         other => Err(DecodeError::UnknownOrReservedType(other)),
     }
 }
@@ -180,6 +235,16 @@ pub const fn check_length(rule: PayloadRule, length: usize) -> Result<(), Decode
             let rows = (length - TICK_HEADER_BYTES) / CREATURE_STATE_BYTES;
             if rows > TICK_STATE_MAX_CREATURES as usize {
                 return Err(DecodeError::CountOverCap { count: rows as u32 });
+            }
+            Ok(())
+        }
+        PayloadRule::Proprioception => {
+            if length < PROPRIOCEPTION_HEADER_BYTES || !(length - PROPRIOCEPTION_HEADER_BYTES).is_multiple_of(CONTACT_BYTES) {
+                return Err(DecodeError::RaggedProprioception { got: length });
+            }
+            let rows = (length - PROPRIOCEPTION_HEADER_BYTES) / CONTACT_BYTES;
+            if rows > CONTACTS_MAX as usize {
+                return Err(DecodeError::ContactsOverCap { count: rows as u32 });
             }
             Ok(())
         }
@@ -209,6 +274,7 @@ pub fn decode(type_byte: u8, payload: &[u8]) -> Result<Message, DecodeError> {
     match rule {
         PayloadRule::TickState => decode_tick_state(payload),
         PayloadRule::Rez => decode_rez(payload),
+        PayloadRule::Proprioception => decode_proprioception(payload),
         PayloadRule::Exact(_) => match type_byte {
             t if t == MessageType::Hello as u8 => decode_hello(payload),
             t if t == MessageType::Welcome as u8 => Ok(Message::Welcome(Welcome {
@@ -377,6 +443,48 @@ fn decode_event(payload: &[u8]) -> Result<Message, DecodeError> {
         kind,
         reserved0: [0; 3],
     }))
+}
+
+fn decode_proprioception(payload: &[u8]) -> Result<Message, DecodeError> {
+    let grounded = payload[12];
+    if grounded > 1 {
+        return Err(DecodeError::InvalidGrounded(grounded));
+    }
+    if payload[13..16] != [0u8; 3] {
+        return Err(DecodeError::ReservedNotZero);
+    }
+    let count = read_u32(payload, 28);
+    let rows_by_length = (payload.len() - PROPRIOCEPTION_HEADER_BYTES) / CONTACT_BYTES;
+    if count as usize != rows_by_length {
+        return Err(DecodeError::ContactsLengthMismatch { count, rows_by_length });
+    }
+    let specific_force = [read_f32(payload, 16), read_f32(payload, 20), read_f32(payload, 24)];
+    if specific_force.iter().any(|axis| !axis.is_finite()) {
+        return Err(DecodeError::ProprioceptionNotFinite);
+    }
+    let mut contacts = Vec::with_capacity(rows_by_length);
+    for row in 0..rows_by_length {
+        let at = PROPRIOCEPTION_HEADER_BYTES + row * CONTACT_BYTES;
+        let contact = Contact {
+            position: [read_f32(payload, at), read_f32(payload, at + 4), read_f32(payload, at + 8)],
+            impulse: [read_f32(payload, at + 12), read_f32(payload, at + 16), read_f32(payload, at + 20)],
+        };
+        if contact.position.iter().chain(contact.impulse.iter()).any(|value| !value.is_finite()) {
+            return Err(DecodeError::ProprioceptionNotFinite);
+        }
+        contacts.push(contact);
+    }
+    Ok(Message::Proprioception {
+        header: Proprioception {
+            tick: read_u64(payload, 0),
+            creature_id: read_u32(payload, 8),
+            grounded,
+            reserved0: [0; 3],
+            specific_force,
+            contact_count: count,
+        },
+        contacts,
+    })
 }
 
 fn decode_tick_state(payload: &[u8]) -> Result<Message, DecodeError> {
@@ -579,6 +687,44 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             out.push(event.kind);
             out.extend_from_slice(&event.reserved0);
         }
+        Message::Proprioception { header, contacts } => {
+            if contacts.len() > CONTACTS_MAX as usize {
+                return Err(EncodeError::ContactsOverCap { count: contacts.len() });
+            }
+            if header.contact_count as usize != contacts.len() {
+                return Err(EncodeError::ContactsRowsMismatch {
+                    count: header.contact_count,
+                    rows: contacts.len(),
+                });
+            }
+            if header.grounded > 1 {
+                return Err(EncodeError::InvalidGrounded(header.grounded));
+            }
+            if header.reserved0 != [0; 3] {
+                return Err(EncodeError::ReservedNotZero);
+            }
+            if header.specific_force.iter().any(|axis| !axis.is_finite())
+                || contacts
+                    .iter()
+                    .any(|contact| contact.position.iter().chain(contact.impulse.iter()).any(|value| !value.is_finite()))
+            {
+                return Err(EncodeError::ProprioceptionNotFinite);
+            }
+            frame_header(out, MessageType::Proprioception, PROPRIOCEPTION_HEADER_BYTES + contacts.len() * CONTACT_BYTES);
+            out.extend_from_slice(&header.tick.to_le_bytes());
+            out.extend_from_slice(&header.creature_id.to_le_bytes());
+            out.push(header.grounded);
+            out.extend_from_slice(&[0; 3]);
+            for axis in header.specific_force {
+                out.extend_from_slice(&axis.to_le_bytes());
+            }
+            out.extend_from_slice(&header.contact_count.to_le_bytes());
+            for contact in contacts {
+                for value in contact.position.iter().chain(contact.impulse.iter()) {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+        }
         Message::Derez(derez) => {
             if derez.reserved0 != [0; 4] {
                 return Err(EncodeError::ReservedNotZero);
@@ -679,6 +825,26 @@ mod tests {
         }
     }
 
+    /// The owner's letter with `contacts` rows, every float distinct so a swapped field shows.
+    fn sample_proprioception(contacts: u32) -> Message {
+        Message::Proprioception {
+            header: Proprioception {
+                tick: 4_242,
+                creature_id: 7,
+                grounded: u8::from(contacts > 0),
+                reserved0: [0; 3],
+                specific_force: [0.0, 9.81, -0.5],
+                contact_count: contacts,
+            },
+            contacts: (0..contacts)
+                .map(|index| Contact {
+                    position: [index as f32, 0.05, -1.0],
+                    impulse: [0.0, 0.3 + index as f32, 0.0],
+                })
+                .collect(),
+        }
+    }
+
     fn sample_tick_state(rows: u32) -> Message {
         let states = (0..rows)
             .map(|index| CreatureState {
@@ -706,6 +872,9 @@ mod tests {
             sample_rez(0, 0, 0),
             sample_rez(4, 2, 1),
             sample_rez(REZ_MAX_VERTICES, REZ_MAX_TRIANGLES, REZ_MAX_MATERIALS),
+            sample_proprioception(0),
+            sample_proprioception(2),
+            sample_proprioception(CONTACTS_MAX),
             Message::Welcome(Welcome {
                 current_tick: 41,
                 nominal_dt_seconds: 0.03125,
@@ -784,7 +953,7 @@ mod tests {
 
     #[test]
     fn unknown_and_reserved_types_are_refused_before_any_copy() {
-        for type_byte in [0u8, 11, 200, 255] {
+        for type_byte in [0u8, 12, 200, 255] {
             assert_eq!(payload_rule(type_byte), Err(DecodeError::UnknownOrReservedType(type_byte)));
         }
     }
@@ -924,6 +1093,97 @@ mod tests {
         assert_eq!(largest_rez.len().max(largest_tick.len()), max_frame_bytes());
         assert!(largest_rez.len() > largest_tick.len(), "the premise: a full body outweighs a full tick");
         assert!(max_frame_bytes() <= FRAME_HEADER_BYTES + FRAME_PAYLOAD_LIMIT);
+    }
+
+    #[test]
+    fn a_proprioception_is_judged_at_the_header_and_refused_by_name() {
+        // Header-time: ragged, over the cap.
+        assert_eq!(check_length(PayloadRule::Proprioception, 32 + 24 * CONTACTS_MAX as usize), Ok(()));
+        assert!(matches!(check_length(PayloadRule::Proprioception, 31), Err(DecodeError::RaggedProprioception { .. })));
+        assert!(matches!(
+            check_length(PayloadRule::Proprioception, 32 + 23),
+            Err(DecodeError::RaggedProprioception { .. })
+        ));
+        assert_eq!(
+            check_length(PayloadRule::Proprioception, 32 + 24 * (CONTACTS_MAX as usize + 1)),
+            Err(DecodeError::ContactsOverCap { count: CONTACTS_MAX + 1 })
+        );
+
+        // Payload-time: a count disagreeing with the length, grounded neither 0 nor 1, reserved
+        // bytes, a NaN in the force and in a contact.
+        let frame = frame_of(&sample_proprioception(2));
+        let payload = &frame[FRAME_HEADER_BYTES..];
+        let mut lying = payload.to_vec();
+        lying[28..32].copy_from_slice(&3u32.to_le_bytes());
+        assert_eq!(
+            decode(MessageType::Proprioception as u8, &lying),
+            Err(DecodeError::ContactsLengthMismatch { count: 3, rows_by_length: 2 })
+        );
+        let mut floating = payload.to_vec();
+        floating[12] = 2;
+        assert_eq!(decode(MessageType::Proprioception as u8, &floating), Err(DecodeError::InvalidGrounded(2)));
+        let mut reserved = payload.to_vec();
+        reserved[14] = 1;
+        assert_eq!(decode(MessageType::Proprioception as u8, &reserved), Err(DecodeError::ReservedNotZero));
+        for offset in [16usize, 32 + 4, 32 + 24 + 20] {
+            let mut poisoned = payload.to_vec();
+            poisoned[offset..offset + 4].copy_from_slice(&f32::NAN.to_le_bytes());
+            assert_eq!(
+                decode(MessageType::Proprioception as u8, &poisoned),
+                Err(DecodeError::ProprioceptionNotFinite),
+                "offset {offset}"
+            );
+        }
+
+        // Encode side: the same refusals before a byte is written.
+        let Message::Proprioception { header, contacts } = sample_proprioception(2) else {
+            unreachable!()
+        };
+        let mut out = Vec::new();
+        let mut too_many = header;
+        too_many.contact_count = CONTACTS_MAX + 1;
+        let rows = vec![contacts[0]; CONTACTS_MAX as usize + 1];
+        assert_eq!(
+            encode(
+                &Message::Proprioception {
+                    header: too_many,
+                    contacts: rows
+                },
+                &mut out
+            ),
+            Err(EncodeError::ContactsOverCap {
+                count: CONTACTS_MAX as usize + 1
+            })
+        );
+        assert_eq!(
+            encode(
+                &Message::Proprioception {
+                    header,
+                    contacts: contacts[..1].to_vec()
+                },
+                &mut out
+            ),
+            Err(EncodeError::ContactsRowsMismatch { count: 2, rows: 1 })
+        );
+        let mut floating = header;
+        floating.grounded = 7;
+        assert_eq!(
+            encode(
+                &Message::Proprioception {
+                    header: floating,
+                    contacts: contacts.clone()
+                },
+                &mut out
+            ),
+            Err(EncodeError::InvalidGrounded(7))
+        );
+        let mut nan = header;
+        nan.specific_force[1] = f32::INFINITY;
+        assert_eq!(
+            encode(&Message::Proprioception { header: nan, contacts }, &mut out),
+            Err(EncodeError::ProprioceptionNotFinite)
+        );
+        assert!(out.is_empty(), "nothing is written before a refusal");
     }
 
     #[test]

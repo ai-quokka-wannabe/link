@@ -42,7 +42,7 @@ extern "C"
 /*! Bumped whenever this table or its rules change. lnkGetClientVTable refuses any other
     number, so a consumer built against a stale copy of this header is told at load time
     rather than corrupted at call time. */
-#define LNK_CLIENT_ABI_VERSION 4u
+#define LNK_CLIENT_ABI_VERSION 5u
 
 /*
     Statuses. Zero is success and only success; everything else names its failure. No function
@@ -102,6 +102,13 @@ typedef struct LnkRezView {
     const LnkRezMaterial* materials; /*!< material_count rows, library-owned. */
 } LnkRezView;
 
+/*! A received PROPRIOCEPTION: the header by value, the contacts borrowed from the library
+    until the next poll on this connection, or close - exactly as the tick's rows. */
+typedef struct LnkProprioceptionView {
+    LnkProprioception proprioception;
+    const LnkContact* contacts; /*!< contact_count rows, library-owned. */
+} LnkProprioceptionView;
+
 /*! One received message. `type` is the LNK_MSG_* that arrived and names the union member to
     read; BYE carries nothing, so the type alone says it all. This struct is API, not wire -
     it holds a pointer, so its size is the platform's business and nothing pins it. */
@@ -118,6 +125,7 @@ typedef struct LnkMessageView {
         LnkHello hello;     /*!< Never sent by an honest server; the view does not judge. */
         LnkActions actions; /*!< Likewise. The consumer decides what arriving here means. */
         LnkRezView rez;     /*!< A creature entering the world, validated whole by the wire. */
+        LnkProprioceptionView proprioception; /*!< The owner's letter: this body's feel this tick. */
     } as;
 } LnkMessageView;
 
@@ -234,6 +242,13 @@ typedef struct LnkClientVTable {
 
     /*! Stage a DEREZ - the creature leaves the world at this tick. */
     LnkStatus (*send_derez)(LnkClient* connection, const LnkDerez* derez);
+
+    /*! Stage a PROPRIOCEPTION on a server-held connection - the owner's letter: the header,
+        then header->contact_count rows read from `contacts`. The count is validated against
+        LNK_CONTACTS_MAX before a single row is read; a zero count never touches the pointer.
+        Refused with LNK_BAD_ARGUMENT on a connection this end dialled (a client never sends
+        it), on a null header, and on a count with no rows behind it. */
+    LnkStatus (*send_proprioception)(LnkClient* connection, const LnkProprioception* proprioception, const LnkContact* contacts);
 
     /*! Stop listening and free the server. Conversations already accepted from it live on;
         a NULL is ignored. */

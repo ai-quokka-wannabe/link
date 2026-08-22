@@ -20,7 +20,7 @@ compile_error!("The Link protocol is little-endian on the wire; a big-endian hos
 /// `LNK_PROTOCOL_VERSION`: bumped whenever any declaration changes meaning or layout. The
 /// handshake carries the header's fingerprint rather than this number; the number exists for
 /// the human-readable refusal.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// `LNK_DEFAULT_PORT`: where Master Control listens when nobody names another port. A default
 /// and only a default. The number is the owner's: 30702, from JA-307020 — Tron's program
@@ -77,6 +77,7 @@ pub enum MessageType {
     Ping = 8,
     Pong = 9,
     Bye = 10,
+    Proprioception = 11,
 }
 
 /// What a client is, stated in HELLO. Zero is invalid. A spectator never sends ACTIONS, and the
@@ -303,6 +304,34 @@ pub struct Event {
     pub reserved0: [u8; 3],
 }
 
+/// `LNK_CONTACTS_MAX`: the most contacts a PROPRIOCEPTION carries, and the most a body may
+/// declare - the letter must be able to carry every contact the body feels.
+pub const CONTACTS_MAX: u32 = 16;
+
+/// One contact a body felt this tick: where, and the impulse delivered there. Twenty-four bytes.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Contact {
+    pub position: [f32; 3],
+    pub impulse: [f32; 3],
+}
+
+/// PROPRIOCEPTION, server to the one host that owns the creature - a letter, not a broadcast.
+/// Every tick after that tick's TICK_STATE: the specific force, whether the feet are on the
+/// ground, and `contact_count` [`Contact`] rows in the same frame. Thirty-two bytes.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Proprioception {
+    pub tick: u64,
+    pub creature_id: u32,
+    /// 1 when the feet touch the ground this tick, else 0.
+    pub grounded: u8,
+    /// Always zero.
+    pub reserved0: [u8; 3],
+    pub specific_force: [f32; 3],
+    pub contact_count: u32,
+}
+
 /// DEREZ, server to every client: the creature leaves the world at this tick.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -345,6 +374,7 @@ pub const fn exact_payload_bytes(message: MessageType) -> Option<usize> {
         MessageType::Ping => Some(size_of::<Ping>()),
         MessageType::Pong => Some(size_of::<Pong>()),
         MessageType::Bye => Some(0),
+        MessageType::Proprioception => None,
     }
 }
 
@@ -368,6 +398,9 @@ const _: () = assert!(size_of::<TickStateHeader>() == 8 + 4 + 4 && size_of::<Tic
 const _: () = assert!(size_of::<Actions>() == 8 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 4 && size_of::<Actions>() == 40);
 const _: () = assert!(size_of::<Event>() == 8 + 12 + 4 + 4 + 1 + 3 && size_of::<Event>() == 32);
 const _: () = assert!(size_of::<Derez>() == 8 + 4 + 4 && size_of::<Derez>() == 16);
+const _: () = assert!(size_of::<Contact>() == 24);
+const _: () = assert!(size_of::<Proprioception>() == 8 + 4 + 1 + 3 + 12 + 4 && size_of::<Proprioception>() == 32);
+const _: () = assert!(size_of::<Proprioception>() + CONTACTS_MAX as usize * size_of::<Contact>() <= FRAME_PAYLOAD_LIMIT);
 const _: () = assert!(size_of::<Ping>() == 8 && size_of::<Pong>() == 8);
 const _: () = assert!(size_of::<TickStateHeader>() + TICK_STATE_MAX_CREATURES as usize * size_of::<CreatureState>() <= FRAME_PAYLOAD_LIMIT);
 
@@ -424,7 +457,7 @@ mod tests {
         assert_eq!(Role::Spectator as u8, 1);
         assert_eq!(Role::CreatureHost as u8, 2);
         assert_eq!(EventKind::Vocalisation as u8, 1);
-        assert_eq!(PROTOCOL_VERSION, 4);
+        assert_eq!(PROTOCOL_VERSION, 5);
         assert_eq!(DEFAULT_PORT, 30_702);
     }
 
