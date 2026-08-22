@@ -16,14 +16,14 @@ use std::time::Duration;
 
 use crate::codec::Message;
 use crate::protocol::{
-    Actions, CreatureState, Derez, Event, Hello, MessageType, PROTOCOL_VERSION, Ping, Pong, REZ_MAX_MATERIALS, REZ_MAX_TRIANGLES, REZ_MAX_VERTICES, Rez, RezMaterial,
-    RezTriangle, RezVertex, Role, TickStateHeader, Welcome, WorldDefinition, world_fingerprint,
+    Actions, CONTACTS_MAX, Contact, CreatureState, Derez, Event, Hello, MessageType, PROTOCOL_VERSION, Ping, Pong, Proprioception, REZ_MAX_MATERIALS, REZ_MAX_TRIANGLES,
+    REZ_MAX_VERTICES, Rez, RezMaterial, RezTriangle, RezVertex, Role, TickStateHeader, Welcome, WorldDefinition, world_fingerprint,
 };
 use crate::transport::{Connection, Listener, TransportError, connect, listen, local_hello, recorded_fingerprint};
 
 /// `LNK_CLIENT_ABI_VERSION`: bumped whenever the vtable or its rules change. The twin lives in
 /// `lnk_client.h`, and a test holds the two together.
-pub const LNK_CLIENT_ABI_VERSION: u32 = 4;
+pub const LNK_CLIENT_ABI_VERSION: u32 = 5;
 
 pub type LnkStatus = i32;
 
@@ -54,6 +54,8 @@ struct ClientInner {
     rez_vertices: Vec<RezVertex>,
     rez_triangles: Vec<RezTriangle>,
     rez_materials: Vec<RezMaterial>,
+    /// The last PROPRIOCEPTION's contacts, under the same borrow rules.
+    contacts: Vec<Contact>,
 }
 
 /// The opaque handle a listening Master Control (or a test playing one) holds.
@@ -87,6 +89,14 @@ pub struct RezView {
     pub materials: *const RezMaterial,
 }
 
+/// `LnkProprioceptionView`: the header by value, the contacts borrowed until the next poll.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ProprioceptionView {
+    pub proprioception: Proprioception,
+    pub contacts: *const Contact,
+}
+
 /// The union behind `LnkMessageView.as`. Every member is plain old data; reading the member the
 /// `type` byte names is the C side's contract, mirrored in the tests here.
 #[repr(C)]
@@ -101,6 +111,7 @@ pub union MessageViewPayload {
     pub hello: Hello,
     pub actions: Actions,
     pub rez: RezView,
+    pub proprioception: ProprioceptionView,
 }
 
 /// `LnkMessageView`, field for field.
@@ -152,6 +163,7 @@ pub struct LnkClientVTable {
     pub send_tick_state: extern "C" fn(connection: *mut LnkClient, header: *const TickStateHeader, states: *const CreatureState) -> LnkStatus,
     pub send_event: extern "C" fn(connection: *mut LnkClient, event: *const Event) -> LnkStatus,
     pub send_derez: extern "C" fn(connection: *mut LnkClient, derez: *const Derez) -> LnkStatus,
+    pub send_proprioception: extern "C" fn(connection: *mut LnkClient, proprioception: *const Proprioception, contacts: *const Contact) -> LnkStatus,
     pub close_server: extern "C" fn(server: *mut LnkServer),
 }
 
@@ -176,6 +188,7 @@ static VTABLE: LnkClientVTable = LnkClientVTable {
     send_tick_state: send_tick_state_impl,
     send_event: send_event_impl,
     send_derez: send_derez_impl,
+    send_proprioception: send_proprioception_impl,
     close_server: close_server_impl,
 };
 
@@ -203,7 +216,7 @@ fn guarded<R>(fallback: R, run: impl FnOnce() -> R) -> R {
 fn status_of(error: &TransportError) -> LnkStatus {
     match error {
         TransportError::Io(_) | TransportError::WriteBufferOverflow => LNK_IO,
-        TransportError::Frame(_) | TransportError::ActionsFromSpectator => LNK_FRAME_REFUSED,
+        TransportError::Frame(_) | TransportError::ActionsFromSpectator | TransportError::ProprioceptionAtServer => LNK_FRAME_REFUSED,
         TransportError::Refused { .. } => LNK_REFUSED,
         TransportError::Garbled(_) => LNK_GARBLED,
         TransportError::PeerClosed => LNK_PEER_CLOSED,
@@ -220,6 +233,7 @@ fn detail_of(error: &TransportError) -> String {
         TransportError::PeerClosed => "link: the peer closed the connection".to_string(),
         TransportError::HandshakeTimedOut => "link: the handshake timed out".to_string(),
         TransportError::ActionsFromSpectator => "link: a spectator sent ACTIONS - the connection is over".to_string(),
+        TransportError::ProprioceptionAtServer => "link: a client sent PROPRIOCEPTION, which only a server may - the connection is over".to_string(),
         TransportError::WriteBufferOverflow => "link: the write buffer overflowed - the peer is not reading".to_string(),
     }
 }
@@ -324,6 +338,7 @@ extern "C" fn connect_impl(
                     rez_vertices: Vec::new(),
                     rez_triangles: Vec::new(),
                     rez_materials: Vec::new(),
+                    contacts: Vec::new(),
                 }))
                 .cast::<LnkClient>()
             }
@@ -390,6 +405,18 @@ extern "C" fn poll_impl(client: *mut LnkClient, out_message: *mut MessageView) -
                             vertices: inner.rez_vertices.as_ptr(),
                             triangles: inner.rez_triangles.as_ptr(),
                             materials: inner.rez_materials.as_ptr(),
+                        },
+                    },
+                )
+            }
+            Message::Proprioception { header, contacts } => {
+                inner.contacts = contacts;
+                (
+                    MessageType::Proprioception,
+                    MessageViewPayload {
+                        proprioception: ProprioceptionView {
+                            proprioception: header,
+                            contacts: inner.contacts.as_ptr(),
                         },
                     },
                 )
@@ -623,6 +650,7 @@ extern "C" fn accept_impl(
                     rez_vertices: Vec::new(),
                     rez_triangles: Vec::new(),
                     rez_materials: Vec::new(),
+                    contacts: Vec::new(),
                 }))
                 .cast::<LnkClient>()
             }
@@ -689,6 +717,40 @@ extern "C" fn send_derez_impl(connection: *mut LnkClient, derez: *const Derez) -
         // SAFETY: non-null was just checked; Derez is plain old data, read by copy.
         let derez = unsafe { *derez };
         queue_on(connection, &Message::Derez(derez))
+    })
+}
+
+extern "C" fn send_proprioception_impl(connection: *mut LnkClient, proprioception: *const Proprioception, contacts: *const Contact) -> LnkStatus {
+    guarded(LNK_PANIC, || {
+        if proprioception.is_null() || connection.is_null() {
+            return LNK_BAD_ARGUMENT;
+        }
+        // SAFETY: non-null was just checked; validity is the header's stated contract.
+        let inner = unsafe { inner_of(connection) };
+        if !inner.connection.may_send_proprioception() {
+            // The letter flows one way: a client-held connection never sends it, and the refusal
+            // starts at the sending half, exactly as the spectator's does.
+            return LNK_BAD_ARGUMENT;
+        }
+        // SAFETY: non-null was just checked; Proprioception is plain old data, read by copy.
+        let header = unsafe { *proprioception };
+        if header.contact_count > CONTACTS_MAX {
+            return LNK_BAD_ARGUMENT;
+        }
+        if header.contact_count > 0 && contacts.is_null() {
+            return LNK_BAD_ARGUMENT;
+        }
+        let rows = if header.contact_count == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: contacts is non-null and the caller promised contact_count rows; the
+            // count was capped above.
+            unsafe { std::slice::from_raw_parts(contacts, header.contact_count as usize) }.to_vec()
+        };
+        match inner.connection.queue(&Message::Proprioception { header, contacts: rows }) {
+            Ok(()) => LNK_OK,
+            Err(_) => LNK_BAD_ARGUMENT,
+        }
     })
 }
 
@@ -1434,6 +1496,102 @@ mod tests {
             (table.send_rez)(connection, &raw const heard.rez, heard.vertices, heard.triangles, heard.materials),
             LNK_OK
         );
+        assert_eq!((table.flush)(connection, &raw mut everything_left), LNK_OK);
+
+        client_thread.join().expect("client thread");
+        (table.close)(connection);
+        (table.close_server)(server);
+    }
+
+    #[test]
+    fn the_owners_letter_travels_the_table_one_way_and_its_contacts_outlive_the_poll() {
+        let table = vtable();
+        let mut status: LnkStatus = -1;
+        let server = (table.listen)(0, WORLD, &raw mut status, std::ptr::null_mut(), 0);
+        let port = (table.server_port)(server);
+
+        let contacts = [
+            Contact {
+                position: [1.0, 0.0, 5.0],
+                impulse: [0.0, 0.3, 0.0],
+            },
+            Contact {
+                position: [1.1, 0.0, 5.0],
+                impulse: [0.0, 0.4, 0.0],
+            },
+        ];
+        let letter = Proprioception {
+            tick: 9,
+            creature_id: 7,
+            grounded: 1,
+            reserved0: [0; 3],
+            specific_force: [0.0, 9.81, 0.0],
+            contact_count: 2,
+        };
+
+        let client_thread = std::thread::spawn(move || {
+            let table = vtable();
+            let address = CString::new(format!("127.0.0.1:{port}")).expect("address");
+            let mut welcome = unsafe { std::mem::zeroed::<Welcome>() };
+            let mut status: LnkStatus = -1;
+            let client = (table.connect)(
+                address.as_ptr(),
+                Role::CreatureHost as u8,
+                WORLD,
+                5_000,
+                &raw mut welcome,
+                &raw mut status,
+                std::ptr::null_mut(),
+                0,
+            );
+            assert_eq!(status, LNK_OK);
+            // A client never sends the letter: refused at the sending half.
+            assert_eq!((table.send_proprioception)(client, &raw const letter, contacts.as_ptr()), LNK_BAD_ARGUMENT);
+
+            let mut view = unsafe { std::mem::zeroed::<MessageView>() };
+            let deadline = std::time::Instant::now() + PATIENCE;
+            loop {
+                match (table.poll)(client, &raw mut view) {
+                    LNK_NOTHING_YET => {
+                        assert!(std::time::Instant::now() < deadline, "the letter never arrived");
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    LNK_OK => break,
+                    other => panic!("poll answered {other}"),
+                }
+            }
+            assert_eq!(view.message_type, MessageType::Proprioception as u8);
+            // SAFETY: the type byte names the union member; the contacts stay valid until the
+            // next poll or close, per the header's contract.
+            let heard = unsafe { view.payload.proprioception };
+            assert_eq!(heard.proprioception, letter);
+            assert_eq!(unsafe { *heard.contacts.add(1) }, contacts[1]);
+            (table.close)(client);
+        });
+
+        let mut hello = unsafe { std::mem::zeroed::<Hello>() };
+        let connection = loop {
+            let knock = (table.accept)(server, 5_000, &raw mut hello, &raw mut status, std::ptr::null_mut(), 0);
+            if !knock.is_null() {
+                break knock;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let welcome = Welcome {
+            current_tick: 9,
+            nominal_dt_seconds: 0.031_25,
+            client_id: 1,
+            world_fingerprint: WORLD,
+        };
+        assert_eq!((table.send_welcome)(connection, &raw const welcome), LNK_OK);
+        // The caps are judged before a row is read, here too.
+        let mut lying = letter;
+        lying.contact_count = CONTACTS_MAX + 1;
+        assert_eq!((table.send_proprioception)(connection, &raw const lying, contacts.as_ptr()), LNK_BAD_ARGUMENT);
+        lying.contact_count = 1;
+        assert_eq!((table.send_proprioception)(connection, &raw const lying, std::ptr::null()), LNK_BAD_ARGUMENT);
+        assert_eq!((table.send_proprioception)(connection, &raw const letter, contacts.as_ptr()), LNK_OK);
+        let mut everything_left = 0u8;
         assert_eq!((table.flush)(connection, &raw mut everything_left), LNK_OK);
 
         client_thread.join().expect("client thread");

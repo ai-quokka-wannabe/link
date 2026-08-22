@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Protocol version 5: proprioception is a letter, not a broadcast.** A creature host is owed
+  what a spectator has no use for - the specific force its otolith reads, whether its feet
+  touch the ground, and the tick's contacts. Rather than grow every `TICK_STATE` row, the
+  ruling (TOPOLOGY.md § The protocol, 2026-08-22) adds `PROPRIOCEPTION`: a 32-byte header
+  (`LnkProprioception`) and up to `LNK_CONTACTS_MAX` (16) `LnkContact` rows, sent by Master
+  Control only to the connection that owns the creature, every tick after that tick's
+  `TICK_STATE` - the first message composed per subscriber. The letter flows one way, and the
+  library enforces it at both ends: `send_proprioception` refuses on a connection this end
+  dialled, and the server half treats the frame arriving *at* the server as the same violation
+  as a spectator's `ACTIONS` (`LNK_FRAME_REFUSED`, connection closed). Decode and encode refuse
+  by name: a ragged length or a count over the cap at header time, a count disagreeing with
+  the length, a grounded byte that is neither 0 nor 1, reserved bytes, any non-finite float.
+  ABI v5 (`send_proprioception`, `LnkProprioceptionView`); versions 1 to 4 refused as history.
 - **Protocol version 4: the body goes on the wire, and both ends must live in one world.**
   `REZ` is no longer a reserved number: it carries the creature's bounds (forward speed, turn
   rate, vocalisation strength, contact budget) and its render model as counted rows —
