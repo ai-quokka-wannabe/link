@@ -97,6 +97,11 @@ pub fn local_hello(role: Role, world_fingerprint: u64) -> Hello {
     }
 }
 
+/// How long [`Connection::close`] waits for the peer to close its half after BYE, discarding
+/// whatever it still sends: a bound on a peer that never hangs up, generous against a healthy
+/// one that answers within a tick or two.
+pub const FAREWELL_WINDOW: Duration = Duration::from_millis(250);
+
 /// At most this many bytes of refusal text are read back after a closed handshake — enough for
 /// any honest refusal, and a bound on a dishonest one.
 pub const REFUSAL_LIMIT_BYTES: usize = 256;
@@ -277,6 +282,23 @@ impl Connection {
     pub fn close(mut self) {
         let _ = self.writer.queue(&Message::Bye);
         let _ = self.writer.flush_into(&mut self.stream);
+        // An orderly release, not a slam: close only the writing half, then read and discard
+        // until the peer closes too (or the farewell window lapses). Slamming both halves while
+        // the peer still has a tick in flight makes this end answer that tick with a TCP reset,
+        // and a reset discards the peer's unread receive buffer - BYE included - so a polite
+        // leave would arrive there as a crash. Found the honest way: the first per-owner
+        // letter made the server write often enough to lose the farewell.
+        let _ = self.stream.shutdown(Shutdown::Write);
+        let _ = self.stream.set_nonblocking(false);
+        let _ = self.stream.set_read_timeout(Some(FAREWELL_WINDOW));
+        let deadline = std::time::Instant::now() + FAREWELL_WINDOW;
+        let mut sink = [0u8; 1024];
+        while std::time::Instant::now() < deadline {
+            match self.stream.read(&mut sink) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
         let _ = self.stream.shutdown(Shutdown::Both);
     }
 }
@@ -788,6 +810,61 @@ mod tests {
             "a letter arriving at the server ends the connection, got {verdict:?}"
         );
         drop(client.join().expect("client thread"));
+    }
+
+    #[test]
+    fn a_bye_survives_a_peer_that_is_still_writing() {
+        // The server is mid-conversation: it writes a whole tick after the client has already
+        // said BYE and closed. A slammed socket would answer that write with a reset and the
+        // BYE would be lost with the reset; an orderly release lets the farewell land.
+        let (listener, address) = loopback();
+        let client = std::thread::spawn(move || {
+            let (connection, _) = connect(address, &local_hello(Role::Spectator, WORLD), PATIENCE).expect("handshake");
+            connection.close();
+        });
+        let (stream, _) = listener.accept().expect("accept");
+        let (mut server_side, _) = accept(stream, PATIENCE, WORLD).expect("handshake");
+        server_side.queue(&welcome()).expect("queue welcome");
+        while !server_side.flush().expect("flush welcome") {}
+        // Let the client reach its farewell: writing half closed, draining for FAREWELL_WINDOW.
+        std::thread::sleep(FAREWELL_WINDOW / 5);
+
+        // The peer has closed its writing half and is draining; write a fat tick at it anyway.
+        let rows = (0..TICK_STATE_MAX_CREATURES)
+            .map(|index| crate::protocol::CreatureState {
+                creature_id: index,
+                position: [0.0; 3],
+                yaw: 0.0,
+                velocity: [0.0; 3],
+                yaw_rate: 0.0,
+                vocalisation: 0.0,
+            })
+            .collect();
+        let _ = server_side.queue(&Message::TickState {
+            header: crate::protocol::TickStateHeader {
+                tick: 1,
+                creature_count: TICK_STATE_MAX_CREATURES,
+                reserved0: [0; 4],
+            },
+            states: rows,
+        });
+        let _ = server_side.flush();
+
+        let deadline = std::time::Instant::now() + PATIENCE;
+        let verdict = loop {
+            match server_side.poll() {
+                Ok(None) => {
+                    assert!(std::time::Instant::now() < deadline, "nothing arrived");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                other => break other,
+            }
+        };
+        assert!(
+            matches!(verdict, Ok(Some(Message::Bye))),
+            "the farewell must survive the peer's last tick, got {verdict:?}"
+        );
+        client.join().expect("client thread");
     }
 
     #[test]
