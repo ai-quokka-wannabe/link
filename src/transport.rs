@@ -190,14 +190,19 @@ impl WriteBuffer {
     /// Push pending bytes into `sink`. `Ok(true)` means everything left; `Ok(false)` means the
     /// socket stopped accepting and the remainder is carried for the next flush.
     pub(crate) fn flush_into(&mut self, sink: &mut impl Write) -> Result<bool, TransportError> {
-        if self.pending.len() > WRITE_BUFFER_LIMIT_BYTES {
-            return Err(TransportError::WriteBufferOverflow);
-        }
         while self.written < self.pending.len() {
             match sink.write(&self.pending[self.written..]) {
                 Ok(0) => return Err(TransportError::PeerClosed),
                 Ok(wrote) => self.written += wrote,
-                Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(false),
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    // The limit is on what the peer left unread, judged after the socket took
+                    // what it would: a big batch to a reading peer is fine, a megabyte a peer
+                    // will not read is the end.
+                    if self.pending_bytes() > WRITE_BUFFER_LIMIT_BYTES {
+                        return Err(TransportError::WriteBufferOverflow);
+                    }
+                    return Ok(false);
+                }
                 Err(error) if error.kind() == ErrorKind::Interrupted => {}
                 Err(error) => return Err(error.into()),
             }
@@ -260,7 +265,15 @@ impl Connection {
         match self.reader.pump(&mut self.stream)? {
             None => Ok(None),
             Some((type_byte, payload)) => {
-                let message = decode(type_byte, &payload).map_err(TransportError::Frame)?;
+                let message = match decode(type_byte, &payload) {
+                    Ok(message) => message,
+                    Err(refusal) => {
+                        // The connection is over, as the header says - shut now, so a later
+                        // close does not bid a hostile peer a polite farewell.
+                        let _ = self.stream.shutdown(Shutdown::Both);
+                        return Err(TransportError::Frame(refusal));
+                    }
+                };
                 if matches!(message, Message::Actions(_) | Message::Rez { .. }) && self.forbid_incoming_actions {
                     let _ = self.stream.shutdown(Shutdown::Both);
                     return Err(TransportError::ActionsFromSpectator);
@@ -303,6 +316,11 @@ impl Connection {
     /// Say BYE and close. Best-effort: the peer may already be gone, and that is fine.
     pub fn close(mut self) {
         let _ = self.writer.queue(&Message::Bye);
+        // The farewell is owed the whole window, not one non-blocking try: a send buffer full of
+        // the last tick would otherwise cut the carried remainder - half a frame and the BYE -
+        // and the peer would read a leave as a crash.
+        let _ = self.stream.set_nonblocking(false);
+        let _ = self.stream.set_write_timeout(Some(FAREWELL_WINDOW));
         let _ = self.writer.flush_into(&mut self.stream);
         // An orderly release, not a slam: close only the writing half, then read and discard
         // until the peer closes too (or the farewell window lapses). Slamming both halves while
@@ -349,6 +367,19 @@ fn read_exactly(stream: &mut TcpStream, bytes: &mut [u8]) -> Result<(), Transpor
 /// its own log. Best-effort on the wire: the refusal is a courtesy, the closure is the point.
 fn refuse(stream: &TcpStream, reason: String) -> TransportError {
     let mut stream_ref = stream;
+    // A wrong client - an HTTP request, a TLS hello - has usually said more than was read, and
+    // closing on unread bytes sends a reset that discards the refusal at the peer. Drain what
+    // is already here, without waiting for more, so the words can land.
+    if stream.set_nonblocking(true).is_ok() {
+        let mut sink = [0u8; 4096];
+        for _ in 0..16 {
+            match stream_ref.read(&mut sink) {
+                Ok(read) if read > 0 => {}
+                _ => break,
+            }
+        }
+        let _ = stream.set_nonblocking(false);
+    }
     let _ = stream_ref.write_all(reason.as_bytes());
     let _ = stream_ref.flush();
     let _ = stream.shutdown(Shutdown::Both);
@@ -356,10 +387,15 @@ fn refuse(stream: &TcpStream, reason: String) -> TransportError {
 }
 
 /// The client half of the handshake: magic, HELLO, then either WELCOME or the server's refusal
-/// line. Blocking, bounded by `timeout` per read. On success the connection is framed and
-/// non-blocking, and the server's WELCOME is handed back beside it.
+/// line. Blocking, bounded by `timeout` - the TCP connect itself included, per address the name
+/// resolves to, and then per read. On success the connection is framed and non-blocking, and
+/// the server's WELCOME is handed back beside it. A zero timeout is refused: it would wait for
+/// nothing and call that a timeout.
 pub fn connect<A: ToSocketAddrs>(address: A, hello: &Hello, timeout: Duration) -> Result<(Connection, Welcome), TransportError> {
-    let mut stream = TcpStream::connect(address)?;
+    if timeout.is_zero() {
+        return Err(TransportError::Garbled("a zero timeout waits for nothing - give the handshake a bound"));
+    }
+    let mut stream = connect_bounded(address, timeout)?;
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
@@ -379,7 +415,8 @@ pub fn connect<A: ToSocketAddrs>(address: A, hello: &Hello, timeout: Duration) -
         let mut reason = header.to_vec();
         let mut rest = [0u8; REFUSAL_LIMIT_BYTES];
         let mut collected = 0;
-        while collected < rest.len() {
+        let patience = std::time::Instant::now() + timeout;
+        while collected < rest.len() && std::time::Instant::now() < patience {
             match stream.read(&mut rest[collected..]) {
                 Ok(0) => break,
                 Ok(read) => collected += read,
@@ -413,6 +450,41 @@ pub fn connect<A: ToSocketAddrs>(address: A, hello: &Hello, timeout: Duration) -
     Ok((Connection::framed(stream, false, hello.role == Role::Spectator as u8, false)?, welcome))
 }
 
+/// `TcpStream::connect` with the timeout applied to the connect itself, every resolved address
+/// tried in turn; a black-holed host costs the timeout, not the operating system's minutes.
+fn connect_bounded<A: ToSocketAddrs>(address: A, timeout: Duration) -> Result<TcpStream, TransportError> {
+    let deadline = std::time::Instant::now() + timeout;
+    let candidates: Vec<_> = address.to_socket_addrs()?.collect();
+    let mut last = None;
+    loop {
+        for candidate in &candidates {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            match TcpStream::connect_timeout(candidate, left) {
+                Ok(stream) => return Ok(stream),
+                Err(error) => last = Some(error),
+            }
+        }
+        // A refused or reset dial is retried within the budget: a server still standing up, a
+        // listener mid-accept. The timeout bounds the whole, and the last refusal is the answer.
+        let transient = matches!(
+            last.as_ref().map(std::io::Error::kind),
+            Some(ErrorKind::ConnectionRefused | ErrorKind::ConnectionReset | ErrorKind::WouldBlock)
+        );
+        if !transient || std::time::Instant::now() + Duration::from_millis(10) >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Err(match last {
+        Some(error) if error.kind() == ErrorKind::TimedOut || error.kind() == ErrorKind::WouldBlock => TransportError::HandshakeTimedOut,
+        Some(error) => TransportError::Io(error.kind()),
+        None => TransportError::Io(ErrorKind::InvalidInput),
+    })
+}
+
 fn read_answer(stream: &mut TcpStream, header: &mut [u8; FRAME_HEADER_BYTES]) -> Result<(), TransportError> {
     match read_exactly(stream, header) {
         Err(TransportError::PeerClosed) => Err(TransportError::Refused {
@@ -428,7 +500,14 @@ fn read_answer(stream: &mut TcpStream, header: &mut [u8; FRAME_HEADER_BYTES]) ->
 /// the framed connection beside the client's HELLO. The caller sends WELCOME itself, promptly:
 /// only it knows the current tick.
 pub fn accept(stream: TcpStream, timeout: Duration, world_fingerprint: u64) -> Result<(Connection, Hello), TransportError> {
+    if timeout.is_zero() {
+        return Err(TransportError::Garbled("a zero timeout waits for nothing - give the handshake a bound"));
+    }
     let mut stream = stream;
+    // The listener is non-blocking and, on Windows, an accepted socket inherits that: a read
+    // before the client's bytes land would answer WouldBlock, and the handshake would report
+    // a timeout that never elapsed. The handshake blocks, bounded by the timeout, as promised.
+    stream.set_nonblocking(false)?;
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
@@ -1026,18 +1105,106 @@ mod tests {
         server.join().expect("server thread");
     }
 
+    /// A sink that takes nothing: the socket of a peer that has stopped reading.
+    struct Deaf;
+
+    impl Write for Deaf {
+        fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(ErrorKind::WouldBlock))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
-    fn an_unread_peer_cannot_grow_the_write_buffer_without_bound() {
+    fn an_unread_peer_cannot_grow_the_write_buffer_without_bound_but_a_reading_one_may_take_a_big_batch() {
+        // A peer that left more than a megabyte unread is dead.
         let mut writer = WriteBuffer {
             pending: vec![0u8; WRITE_BUFFER_LIMIT_BYTES + 1],
             written: 0,
         };
-        let mut sink = Vec::new();
         assert!(
-            matches!(writer.flush_into(&mut sink), Err(TransportError::WriteBufferOverflow)),
+            matches!(writer.flush_into(&mut Deaf), Err(TransportError::WriteBufferOverflow)),
             "a megabyte of unread pending bytes is a dead peer, not a bigger buffer"
         );
-        assert!(sink.is_empty(), "an overflowing buffer must not keep writing");
+        // The same batch to a peer that reads it is just a big tick - a late joiner told every
+        // body at once - and leaves whole.
+        let mut writer = WriteBuffer {
+            pending: vec![0u8; 2 * WRITE_BUFFER_LIMIT_BYTES],
+            written: 0,
+        };
+        let mut sink = Vec::new();
+        assert!(matches!(writer.flush_into(&mut sink), Ok(true)), "a reading peer takes the batch");
+        assert_eq!(sink.len(), 2 * WRITE_BUFFER_LIMIT_BYTES);
+        // And a little left unread is carried, not condemned.
+        let mut writer = WriteBuffer {
+            pending: vec![0u8; 100],
+            written: 0,
+        };
+        assert!(matches!(writer.flush_into(&mut Deaf), Ok(false)));
+        assert_eq!(writer.pending_bytes(), 100);
+    }
+
+    #[test]
+    fn a_client_that_hesitates_after_dialling_is_waited_for_not_timed_out_at_once() {
+        // The listener is non-blocking, and an accepted socket inherits that on Windows: the
+        // handshake must block for the client's bytes, bounded by the timeout, rather than
+        // read WouldBlock and call it a timeout that never elapsed. The flake this pins came
+        // once in a dozen runs; the hesitation makes it every time.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).expect("non-blocking, as the Listener is");
+        let address = listener.local_addr().expect("address");
+        let client = std::thread::spawn(move || {
+            let mut raw = TcpStream::connect(address).expect("dial");
+            std::thread::sleep(Duration::from_millis(200));
+            let mut opening = Vec::new();
+            opening.extend_from_slice(&MAGIC);
+            encode(&Message::Hello(local_hello(Role::Spectator, WORLD)), &mut opening).expect("encode");
+            raw.write_all(&opening).expect("hello, late");
+            raw.flush().expect("flush");
+            let _ = raw.read(&mut [0u8; 64]); // until the server hangs up
+        });
+        let stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(1)),
+                Err(error) => panic!("{error}"),
+            }
+        };
+        let verdict = accept(stream, PATIENCE, WORLD);
+        assert!(verdict.is_ok(), "a late HELLO within the timeout is a handshake, got {:?}", verdict.err());
+        drop(verdict);
+        client.join().expect("client");
+    }
+
+    #[test]
+    fn a_zero_timeout_is_refused_and_a_black_hole_costs_the_timeout_not_minutes() {
+        let (listener, address) = loopback();
+        assert!(
+            matches!(
+                connect(address, &local_hello(Role::Spectator, WORLD), Duration::ZERO),
+                Err(TransportError::Garbled(_))
+            ),
+            "a zero timeout waits for nothing"
+        );
+        let (stream, _) = {
+            let client = std::net::TcpStream::connect(address).expect("dial");
+            (listener.accept().expect("accept").0, client)
+        };
+        assert!(matches!(accept(stream, Duration::ZERO, WORLD), Err(TransportError::Garbled(_))));
+
+        // TEST-NET-1 (RFC 5737) is never routed: a connect there is a black hole on any honest
+        // network, and with the bound it costs the timeout - not the operating system's minutes.
+        let started = std::time::Instant::now();
+        let verdict = connect("192.0.2.1:30702", &local_hello(Role::Spectator, WORLD), Duration::from_millis(300));
+        assert!(verdict.is_err(), "nobody answers at a black hole");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the connect itself is bounded, took {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
@@ -1101,6 +1268,11 @@ mod tests {
             matches!(verdict, Err(TransportError::Frame(DecodeError::WrongLength { expected: 48, got: 65535 }))),
             "got {verdict:?}"
         );
+        // The connection is over, as the header says: the socket is shut, not merely judged.
+        let mut probe = [0u8; 1];
+        let _ = connection.stream.set_nonblocking(false);
+        let _ = connection.stream.set_read_timeout(Some(Duration::from_millis(500)));
+        assert!(!matches!(connection.stream.read(&mut probe), Ok(1)), "a refused connection must be shut");
         client.join().expect("client thread");
     }
 

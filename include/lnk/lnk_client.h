@@ -55,7 +55,8 @@ typedef int32_t LnkStatus;
 #define LNK_OK 0
 /*! poll: the socket holds no complete frame yet. Not an error; turn the loop and ask again. */
 #define LNK_NOTHING_YET 1
-/*! The far end said no during the handshake; the detail buffer carries its words verbatim. */
+/*! The far end said no during the handshake; the detail buffer carries its words verbatim. Also
+    a Disk path refused before any file is touched: not ending in .disk, or climbing with '..'. */
 #define LNK_REFUSED 2
 #define LNK_HANDSHAKE_TIMED_OUT 3
 #define LNK_PEER_CLOSED 4
@@ -122,8 +123,8 @@ typedef struct LnkMessageView {
         LnkDerez derez;
         LnkPing ping;
         LnkPong pong;
-        LnkHello hello;     /*!< Never sent by an honest server; the view does not judge. */
-        LnkActions actions; /*!< Likewise. The consumer decides what arriving here means. */
+        LnkHello hello;     /*!< Only on a server-held connection; at a client it is the wrong way, and refused. */
+        LnkActions actions; /*!< Likewise: a client's word. Every message flows one way, and the wire judges. */
         LnkRezView rez;     /*!< A creature entering the world, validated whole by the wire. */
         LnkProprioceptionView proprioception; /*!< The owner's letter: this body's feel this tick. */
     } as;
@@ -150,8 +151,9 @@ typedef struct LnkClientVTable {
     /*! The whole handshake: magic, HELLO with this library's own fingerprint and the caller's
         world fingerprint, WELCOME back - whose world fingerprint is compared against the
         caller's, because the skew check bites in both directions and a client must not
-        perceive a world it would silently mis-place. Blocking, bounded by the timeout per
-        read. On success returns the client and writes the WELCOME. On failure returns NULL,
+        perceive a world it would silently mis-place. Blocking, bounded by the timeout - the
+        TCP connect itself included, then each read; a zero timeout is LNK_BAD_ARGUMENT, since
+        it would wait for nothing. On success returns the client and writes the WELCOME. On failure returns NULL,
         writes the status, and writes a NUL-terminated UTF-8 line into the detail buffer - the
         server's refusal verbatim when there is one. `role` is LNK_ROLE_SPECTATOR or
         LNK_ROLE_CREATURE_HOST; `address_utf8` is host:port. */
@@ -159,9 +161,12 @@ typedef struct LnkClientVTable {
                           LnkStatus* out_status, char* out_detail_utf8, uint32_t detail_capacity_bytes);
 
     /*! One complete message if the socket holds one (LNK_OK, view written), LNK_NOTHING_YET if
-        it does not. Never blocks. Any other status ends the connection's useful life. On a
-        server-held connection whose HELLO said spectator, an arriving ACTIONS frame is the role
-        violation the protocol header names: LNK_FRAME_REFUSED, the socket already shut. */
+        it does not. Never blocks. Any other status ends the connection's useful life, the socket
+        already shut: a frame the codec refuses; ACTIONS or REZ on a server-held connection whose
+        HELLO said spectator, the role violation the protocol header names; and a message the
+        wrong way - WELCOME, TICK_STATE, EVENT or PROPRIOCEPTION arriving at the server, HELLO or
+        ACTIONS arriving at a client - since every message flows one way. All LNK_FRAME_REFUSED,
+        the detail naming which. */
     LnkStatus (*poll)(LnkClient* client, LnkMessageView* out_message);
 
     /*! Stage the creature's intent for the next flush - the current tick's twelve bytes and the
@@ -186,10 +191,11 @@ typedef struct LnkClientVTable {
 
     /*! One coalesced write per tick: push everything staged. Writes 1 to out_everything_left
         when the buffer emptied, 0 when the socket filled and the remainder is carried - call
-        again next tick. The carried remainder is bounded: a peer that stops reading while a
-        megabyte accumulates earns LNK_IO and the connection is over, because an unbounded
-        buffer is an allocation the peer controls. The keepalive constants in lnk_protocol.h
-        usually reap such a peer first; the caller owns that clock. */
+        again next tick. The carried remainder is bounded: a peer that has left more than a
+        megabyte unread after the socket took what it would earns LNK_IO and the connection is
+        over, because an unbounded buffer is an allocation the peer controls - a big batch to a
+        peer that reads (a late joiner told every body) is never that. The keepalive constants
+        in lnk_protocol.h usually reap such a peer first; the caller owns that clock. */
     LnkStatus (*flush)(LnkClient* client, uint8_t* out_everything_left);
 
     /*! Say BYE, close the socket, free everything the client owns. The pointer is dead after
@@ -220,7 +226,7 @@ typedef struct LnkClientVTable {
     /*! One knock, if somebody knocked: accepts a pending connection and walks the whole
         handshake - magic, HELLO, the protocol fingerprint comparison, the world fingerprint
         comparison against the listener's own, refusals in words to the far end - bounded by
-        the timeout. LNK_NOTHING_YET when nobody is waiting; turn the loop and ask again. On
+        the timeout - zero is LNK_BAD_ARGUMENT, judged before any knock is answered. LNK_NOTHING_YET when nobody is waiting; turn the loop and ask again. On
         success returns the conversation - poll, flush and close apply to it exactly as to a
         connected client - and writes the client's HELLO. The caller sends WELCOME itself,
         promptly: only it knows the current tick. */
@@ -257,7 +263,9 @@ typedef struct LnkClientVTable {
     /*! A client whose socket is a file, the writing half: open a recording at `path_utf8`. The
         handle behaves as a server-held connection with no peer - every send_* stages a frame,
         flush writes them all (a file never says "later"), poll always answers LNK_NOTHING_YET,
-        close writes BYE and closes the file. The header names this build's protocol fingerprint
+        close writes BYE and closes the file - and a file that could not take the BYE (a full
+        disk) ends without one, which a replay reads as the world ending in a crash: the truth.
+        The path must end in .disk and never climb with '..' (LNK_REFUSED otherwise). The header names this build's protocol fingerprint
         and the world, tick and dt given here, exactly as a WELCOME would. Master Control feeds it
         from the same per-subscriber loop as every citizen: the state log is what was said, in
         the wire's own bytes, and a replay viewer is a spectator that opened it. */

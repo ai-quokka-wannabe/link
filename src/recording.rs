@@ -143,8 +143,11 @@ impl Recorder {
     /// Write everything queued. Always everything: a file never says "later".
     pub fn flush(&mut self) -> Result<bool, TransportError> {
         let before = self.writer.pending_bytes();
-        let done = self.writer.flush_into(&mut self.file)?;
-        self.bytes_written += before as u64;
+        let result = self.writer.flush_into(&mut self.file);
+        // What actually left, error or not - a rotation reads this, and a short write that
+        // failed still wrote.
+        self.bytes_written += (before - self.writer.pending_bytes()) as u64;
+        let done = result?;
         self.file.flush()?;
         Ok(done)
     }

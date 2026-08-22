@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Nine findings of a bug hunt, fixed, the low and the cosmetic included.** The TCP connect
+  itself is now bounded by the handshake timeout (`connect_timeout` per resolved address), as
+  the header always claimed; a zero timeout is `LNK_BAD_ARGUMENT` at both ends instead of an
+  I/O error that, at the server, dropped an already-accepted client without a word. The
+  write-buffer limit judges what the peer left *unread* after the socket took what it would,
+  so a late joiner told every body at once is a big tick and not a dead peer - before, a
+  batch over a megabyte failed at once and forever. `close` gives the farewell the whole
+  window, blocking, rather than one non-blocking try that could cut half a frame and the BYE
+  and turn a leave into a crash. A refusal drains what a wrong client already sent before it
+  closes, so the words are not reset away under an HTTP request. A frame the codec refuses
+  shuts the socket, as the header says. The refusal read in `connect` is bounded by the
+  timeout as a whole, not per byte. The Disk's byte count is what actually reached the file,
+  error or not. The detail line never cuts a UTF-8 sequence. The header's words follow:
+  which messages flow which way, what `LNK_REFUSED` also means for a Disk path, a Disk that
+  could not take its BYE, the three variable-size messages, and the creature host hearing
+  EVENTs.
+- **A flake pinned and fixed: the handshake no longer times out before it waited.** The
+  listener is non-blocking and, on Windows, an accepted socket inherits that; a server whose
+  `accept` ran before the client's HELLO bytes had landed read WouldBlock and reported a
+  handshake timeout that never elapsed - once in a dozen runs. The accepted socket now blocks
+  for the handshake, bounded by the timeout as promised, and a test with a client that
+  hesitates 200 ms after dialling makes the old behaviour fail every time. Beside it, the
+  bounded connect retries a refused or reset dial within its budget, so a client dialling a
+  server still standing up waits its timeout rather than failing at the first SYN.
+
 - **Every message flows its own way only.** The letter already did; now the rule is whole. A
   WELCOME, TICK_STATE, EVENT or PROPRIOCEPTION arriving at the server, or a HELLO or ACTIONS
   arriving at a client, ends the connection before the consumer sees it -
