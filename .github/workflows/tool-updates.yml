@@ -1,0 +1,108 @@
+name: Tool Updates
+
+# The pins Dependabot cannot see - an SDK version in a workflow, a toolchain channel, a formatter's
+# major, a Qt kit - checked weekly against their own release feeds. Adopted from the owner's
+# arm-dev-env. A newer release opens ONE tracking issue per tool (edited on later runs, closed by
+# itself once the pin catches up): an issue, not a pull request, because the organisation does
+# not let Actions open pull requests, and a bump is a decision - the new version has to be
+# installed on the desk and the checksums re-recorded - not a merge button.
+
+permissions:
+    contents: read
+
+on:
+    schedule:
+        # Saturdays 00:23 UTC, beside Dependabot's own Saturday - off the hour to dodge the rush.
+        - cron: "23 0 * * 6"
+
+    workflow_dispatch:
+
+jobs:
+    check:
+        name: Check (${{ matrix.name }})
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+
+        permissions:
+            contents: read
+            issues: write
+
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - key: rust
+                      name: Rust toolchain
+                      where: '`channel` in `rust-toolchain.toml`'
+                      current: 'grep -oP ''channel = "\K[0-9.]+'' rust-toolchain.toml'
+                      latest: 'gh api repos/rust-lang/rust/releases/latest --jq .tag_name'
+                      notes: https://github.com/rust-lang/rust/releases
+                    - key: lychee
+                      name: lychee
+                      where: '`LYCHEE_VERSION` and `LYCHEE_SHA256` in `.github/workflows/*.yml`'
+                      current: 'grep -ohP ''LYCHEE_VERSION: v\K[0-9.]+'' .github/workflows/ci_pr.yml | head -1'
+                      latest: 'gh api repos/lycheeverse/lychee/releases/latest --jq .tag_name | sed ''s/^lychee-v//'''
+                      notes: https://github.com/lycheeverse/lychee/releases
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            - name: Track a newer release in an issue
+              shell: bash
+              env:
+                GH_TOKEN: ${{ github.token }}
+                TOOL: ${{ matrix.name }}
+                WHERE: ${{ matrix.where }}
+                CURRENT_COMMAND: ${{ matrix.current }}
+                LATEST_COMMAND: ${{ matrix.latest }}
+                NOTES: ${{ matrix.notes }}
+              run: |
+                current=$(bash -c "${CURRENT_COMMAND}")
+                latest=$(bash -c "${LATEST_COMMAND}" || true)
+                echo "${TOOL}: pinned=${current} latest=${latest}"
+                if [[ -z "${current}" ]]; then
+                    echo "::error::Could not read the pinned ${TOOL} version - the pin moved, so this workflow's matrix is stale."
+                    exit 1
+                fi
+                if [[ -z "${latest}" || "${latest}" == "null" ]]; then
+                    echo "::warning::Could not resolve the latest ${TOOL} release; skipping this week."
+                    exit 0
+                fi
+
+                title="Tool update: ${TOOL}"
+                issue=$(gh issue list --state open --limit 100 --json number,title --jq "[.[] | select(.title == \"${title}\")][0].number // empty")
+
+                # Newer only when strictly greater, so a transient feed result never regresses a pin.
+                newest=$(printf '%s\n%s\n' "${current}" "${latest}" | sort -V | tail -1)
+                if [[ "${latest}" == "${current}" || "${newest}" != "${latest}" ]]; then
+                    echo "${TOOL} is up to date."
+                    if [[ -n "${issue}" ]]; then
+                        gh issue close "${issue}" --comment "The pin is at the latest release (\`${current}\`) now. Closing automatically."
+                    fi
+                    exit 0
+                fi
+
+                body="${RUNNER_TEMP}/issue.md"
+                {
+                    echo "A newer **${TOOL}** release is available."
+                    echo
+                    echo "| | Version |"
+                    echo "|---|---|"
+                    echo "| Pinned (${WHERE}) | \`${current}\` |"
+                    echo "| Latest release | \`${latest}\` |"
+                    echo
+                    echo "Release notes: ${NOTES}"
+                    echo
+                    echo "**To update:** install the new version on the desk, move the pin (${WHERE}), re-record any checksum beside it, and let CI prove it. A bump is a decision, not a merge button."
+                    echo
+                    echo "_Opened by the Tool Updates workflow; it closes this issue itself once the pin catches up._"
+                } > "${body}"
+
+                if [[ -n "${issue}" ]]; then
+                    gh issue edit "${issue}" --body-file "${body}"
+                    echo "Updated issue #${issue}"
+                else
+                    gh issue create --title "${title}" --body-file "${body}" --label dependencies \
+                        || gh issue create --title "${title}" --body-file "${body}"
+                fi
