@@ -1,0 +1,12 @@
+{
+    "name": "link-tooling",
+    "version": "0.0.0",
+    "private": true,
+    "description": "The markdown linter this repository's quick-checks run, pinned by package-lock.json so a lint run is reproducible and a linter bump is a reviewable change.",
+    "scripts": {
+        "lint:md": "markdownlint-cli2 \"**/*.md\""
+    },
+    "devDependencies": {
+        "markdownlint-cli2": "0.23.2"
+    }
+}

@@ -8,3 +8,12 @@ updates:
         day: saturday
         time: "00:00"
         timezone: "Europe/Ljubljana"
+
+    # The markdown linter pinned in package-lock.json: a bump is a pull request, never a surprise.
+    - package-ecosystem: "npm"
+      directory: "/"
+      schedule:
+        interval: weekly
+        day: saturday
+        time: "00:00"
+        timezone: "Europe/Ljubljana"
