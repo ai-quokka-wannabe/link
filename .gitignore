@@ -17,3 +17,6 @@ __pycache__/
 *.pyc
 # The CMake face, built through its preset - from CI or from curiosity.
 /build
+
+# The pinned markdown linter, installed by `npm ci`; the lock file is tracked, the modules are not.
+/node_modules/

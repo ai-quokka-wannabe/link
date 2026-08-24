@@ -16,6 +16,7 @@ jobs:
     quick-checks:
         name: Quick Checks (markdown)
         runs-on: ubuntu-latest
+        timeout-minutes: 10
 
         steps:
             - name: Checkout repository
@@ -27,22 +28,21 @@ jobs:
               with:
                 node-version: "lts/*"
 
-            - name: Get markdownlint-cli2 version
-              id: mdlint-version
-              run: echo "version=$(npm view markdownlint-cli2 version)" >> "$GITHUB_OUTPUT"
-
             # Restore cache from main branch (read-only)
             - name: Restore npm cache
               uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
                 path: ~/.npm
-                key: npm-markdownlint-${{ runner.os }}-node-${{ steps.setup-node.outputs.node-version }}-mdlint-${{ steps.mdlint-version.outputs.version }}
+                key: npm-${{ runner.os }}-node-${{ steps.setup-node.outputs.node-version }}-lock-${{ hashFiles('package-lock.json') }}
 
-            - name: Install markdownlint-cli2
-              run: npm install -g markdownlint-cli2@${{ steps.mdlint-version.outputs.version }}
+            # The linter is pinned by package-lock.json - the same bytes on every run and on every
+            # desk - so a lint run is reproducible and a linter bump is a reviewable change rather
+            # than a surprise red build. Dependabot proposes those bumps.
+            - name: Install the pinned markdownlint-cli2
+              run: npm ci --ignore-scripts
 
             - name: Lint markdown
-              run: markdownlint-cli2 "**/*.md"
+              run: npx markdownlint-cli2 "**/*.md"
 
             # A carriage return sitting inside a line is invisible in every editor, survives
             # rustfmt and markdownlint, and reads as ordinary text in review. Three reached the
@@ -159,6 +159,7 @@ jobs:
         name: CI Success
         needs: [quick-checks, build]
         runs-on: ubuntu-latest
+        timeout-minutes: 5
         if: always()
 
         steps:
