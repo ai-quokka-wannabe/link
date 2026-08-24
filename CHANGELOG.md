@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A release can be rehearsed, is gated three ways, is checked as shipped, and lands as a
+  draft.** Adopted from the owner's `altium-designer-mcp` and `claude-chats-browser`, mirrored
+  from the flagship. A manual dispatch builds, packages and checks every artefact as a tag would,
+  as `<version>-dryrun`, and publishes nothing. On a tag, `validate` refuses a tagged commit not
+  on main, a CHANGELOG without a section for the version, and a release that already exists.
+  Each archive is unpacked into a clean directory and every file the contract needs is present
+  by name - which is how `lnk_client.h`, the vtable header a consumer compiles against, was
+  found missing from the artefact: it ships now, beside `lnk_protocol.h` and the fingerprint,
+  and the fingerprint in the archive must be the one this build recorded. The release job
+  publishes only when both platforms' artefacts arrived and the checksums read back clean, as
+  a draft with the publish command in the step summary.
+
 - **Every internal link and anchor is checked per pull request, the external ones weekly.**
   Adopted from the owner's `altium-designer-mcp`: `lychee --offline --include-fragments` in
   quick-checks, installed from its pinned release with a checksum rather than through a
