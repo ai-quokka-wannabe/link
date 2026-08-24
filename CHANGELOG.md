@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The pins Dependabot cannot see are watched weekly.** Adopted from the owner's `arm-dev-env`:
+  `tool-updates.yml` reads each pinned tool version out of the tree, resolves the latest
+  release from the tool's own feed, and opens one tracking issue per tool that is behind -
+  edited on later runs, closed by itself when the pin catches up. An issue, not a pull
+  request: a bump is installed on the desk and its checksum re-recorded, a decision rather
+  than a merge button.
 - **The markdown linter is pinned and every job has a timeout.** Adopted from the owner's
   `arm-cmake-toolchains` and `claude-chats-browser`: `package.json` + `package-lock.json` pin
   markdownlint-cli2 to the byte, `npm ci` installs exactly that, the cache is keyed on the lock
