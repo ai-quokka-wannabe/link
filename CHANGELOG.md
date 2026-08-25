@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The toolchain is pinned in one place, and CI says so.** Adopted from the owner's
+  `setonix-os`: `.github/scripts/check-toolchain-pin.sh` in quick-checks refuses a
+  `rust-toolchain.toml` that floats and any workflow that installs a toolchain of its own - a
+  second source of truth for the compiler version is the drift that leaves everything building.
+  Its first run found one: the release workflow updated to floating stable before building -
+  harmless only because rust-toolchain.toml overrides it inside the tree - and now installs the
+  pin like every other job.
+- **A wire change names its companions.** The pull request template asks, for every change to
+  a message, a cap or `lnk_client.h`, for the companion pull requests in the three consumers
+  (or the stated reason a consumer needs none) - the lightweight way to review a protocol change
+  and its consumers together, adopted from the owner's `arm-cortex-mx-core-tests`.
+- **`/check-coherence`.** A documentation audit for contradictions between clauses that were
+  each right when written, orphaned claims about the tree, facts stated twice against the
+  single-source-of-truth table, scope drift and stale "today" sections - and one that is willing
+  to conclude the documents are coherent. Adopted from the owner's `setonix-os`; the same file
+  in every repository of the organisation.
 - **The pins Dependabot cannot see are watched weekly.** Adopted from the owner's `arm-dev-env`:
   `tool-updates.yml` reads each pinned tool version out of the tree, resolves the latest
   release from the tool's own feed, and opens one tracking issue per tool that is behind -

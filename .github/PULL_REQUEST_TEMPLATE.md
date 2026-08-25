@@ -15,6 +15,16 @@ Fixes #(issue number)
 - [ ] Refactoring (no functional changes)
 - [ ] CI/CD changes
 
+## The consumers
+
+The wire has three consumers - tron-grid-lite, master-control and rc-worm - and 0.0.0 keeps
+no backwards compatibility, so a change to a message, a cap or `lnk_client.h` lands with them
+or not at all.
+
+- [ ] Neither the wire nor `lnk_client.h` changed
+- [ ] They changed, and the companion pull requests in every consumer are linked above (or the
+      reason a consumer needs none is stated)
+
 ## Testing
 
 - [ ] I have tested these changes locally

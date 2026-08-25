@@ -146,12 +146,13 @@ jobs:
             - name: Checkout repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-            # The runners ship a Rust toolchain, but an image refresh can lag a release; updating
-            # to current stable makes the toolchain a fact of this run rather than of the image.
-            - name: Update the stable toolchain
+            # The runners ship a Rust toolchain, but the build is pinned to one exact version in
+            # rust-toolchain.toml, here as in CI and on the desk: what ships was built by the
+            # compiler the pin names, never by whatever stable the image or the day had.
+            - name: Install the pinned toolchain
               run: |
-                rustup update --no-self-update stable
-                rustup default stable
+                # rust-toolchain.toml pins the exact version; rustup installs it on first use.
+                rustup show active-toolchain
                 cargo --version
                 rustc --version
 
