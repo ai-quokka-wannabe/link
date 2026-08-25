@@ -83,6 +83,13 @@ jobs:
             - name: Check internal links and anchors
               run: lychee --offline --include-fragments --no-progress --root-dir "$(pwd)" --exclude-path target --exclude-path build --exclude-path node_modules "./**/*.md"
 
+            # rust-toolchain.toml is the one place a compiler version lives. The day a workflow
+            # installs a toolchain of its own, CI has a second source of truth and the pin's
+            # guarantee is gone silently - everything still builds. Adopted from the owner's
+            # setonix-os.
+            - name: The toolchain is pinned in one place
+              run: bash .github/scripts/check-toolchain-pin.sh
+
             # LNK_PROTOCOL_VERSION stops two ends of the wire shaking hands on a number while
             # disagreeing about the bytes, and nothing enforces it by itself. So the header is
             # fingerprinted with the version line removed, and a changed fingerprint at an
