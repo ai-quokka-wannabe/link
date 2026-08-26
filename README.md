@@ -57,7 +57,7 @@ platforms, so it cannot rot: it is the build, not a side check.
 
 ## Where It Stands
 
-The contract is pinned at protocol version 6: `include/lnk/lnk_protocol.h` carries the framing,
+The contract is pinned at protocol version 7: `include/lnk/lnk_protocol.h` carries the framing,
 all eleven messages as no-padding PODs, and the fingerprint the handshake refuses mismatches with —
 mirrored field for field and size-asserted again in `src/protocol.rs`, guarded in CI by
 `tools/check_protocol_version.py`. The codec turns frames into messages by refusal, and the

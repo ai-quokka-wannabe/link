@@ -816,6 +816,8 @@ mod tests {
                 vertex_count: 0,
                 triangle_count: 0,
                 material_count: 0,
+                segment_count: 1,
+                segment_spacing: 0.0,
             },
             vertices: Vec::new(),
             triangles: Vec::new(),
@@ -1034,6 +1036,8 @@ mod tests {
                 velocity: [0.0; 3],
                 yaw_rate: 0.0,
                 vocalisation: 0.0,
+                segment_count: 1,
+                segments: [crate::protocol::SegmentPose::default(); crate::protocol::TRAILING_SEGMENTS_MAX],
             })
             .collect();
         let _ = server_side.queue(&Message::TickState {
@@ -1309,6 +1313,8 @@ mod tests {
                     velocity: [0.0, 0.0, 0.0],
                     yaw_rate: 0.0,
                     vocalisation: 0.0,
+                    segment_count: 1,
+                    segments: [crate::protocol::SegmentPose::default(); crate::protocol::TRAILING_SEGMENTS_MAX],
                 };
                 TICK_STATE_MAX_CREATURES as usize
             ],

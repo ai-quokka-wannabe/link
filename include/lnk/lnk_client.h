@@ -42,7 +42,7 @@ extern "C"
 /*! Bumped whenever this table or its rules change. lnkGetClientVTable refuses any other
     number, so a consumer built against a stale copy of this header is told at load time
     rather than corrupted at call time. */
-#define LNK_CLIENT_ABI_VERSION 6u
+#define LNK_CLIENT_ABI_VERSION 7u
 
 /*
     Statuses. Zero is success and only success; everything else names its failure. No function

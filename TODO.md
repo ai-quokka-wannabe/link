@@ -44,7 +44,7 @@ fingerprint comparison, a dropped partial-write carry, a forgotten partial heade
 
 ## Etape 4 — the C ABI surface
 
-**Done, both halves; ABI version 6 today.** `include/lnk/lnk_client.h` declares the surface and `src/abi.rs`
+**Done, both halves; ABI version 7 today.** `include/lnk/lnk_client.h` declares the surface and `src/abi.rs`
 implements it: one exported symbol, `lnkGetClientVTable`, returning NULL for any version but its
 own — the flagship's `tglGetProgramVTable` refusal, reproduced — with `vtable_bytes` and
 `abi_version` as the table's first members. Behind it: connect (the whole handshake, refusals

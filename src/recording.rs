@@ -262,6 +262,8 @@ mod tests {
                     velocity: [0.0; 3],
                     yaw_rate: 0.0,
                     vocalisation: 0.0,
+                    segment_count: 1,
+                    segments: [crate::protocol::SegmentPose::default(); crate::protocol::TRAILING_SEGMENTS_MAX],
                 }],
             })
             .expect("queue");
