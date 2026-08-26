@@ -13,7 +13,8 @@
 
 use crate::protocol::{
     Actions, CONTACTS_MAX, Contact, CreatureState, Derez, Event, EventKind, FRAME_HEADER_BYTES, Hello, MessageType, Ping, Pong, Proprioception, REZ_MAX_MATERIALS,
-    REZ_MAX_TRIANGLES, REZ_MAX_VERTICES, Rez, RezMaterial, RezTriangle, RezVertex, Role, TICK_STATE_MAX_CREATURES, TickStateHeader, Welcome,
+    REZ_MAX_TRIANGLES, REZ_MAX_VERTICES, Rez, RezMaterial, RezTriangle, RezVertex, Role, SEGMENTS_MAX, SegmentPose, TICK_STATE_MAX_CREATURES, TRAILING_SEGMENTS_MAX,
+    TickStateHeader, Welcome,
 };
 
 /// A decoded message, owning its payload. TICK_STATE's rows live in a `Vec` sized only after
@@ -112,6 +113,26 @@ pub enum DecodeError {
     /// A REZ float that is not a real number. A NaN vertex entering a hierarchy poisons a
     /// traversal that fails somewhere else entirely, so it never crosses the wire.
     RezNotFinite,
+    /// A chain of no segments, or of more than the cap - a creature has at least its head.
+    RezSegmentCountOutOfRange {
+        count: u32,
+    },
+    /// A spacing that is not finite, not positive for a chain, or not zero for a single body.
+    RezSpacingInvalid,
+    /// A TICK_STATE row whose chain is empty or over the cap.
+    SegmentCountOutOfRange {
+        creature_id: u32,
+        count: u32,
+    },
+    /// A TICK_STATE float - the head's or a segment's - that is not a real number.
+    TickStateNotFinite {
+        creature_id: u32,
+    },
+    /// A segment slot beyond the chain's length that is not all zero: a row's bytes are hashed
+    /// and recorded, so a slot nobody means must not carry whatever was in memory.
+    SegmentSlotNotZero {
+        creature_id: u32,
+    },
 }
 
 /// Why a message was refused at the sending end. Encode refuses exactly what decode refuses,
@@ -147,6 +168,21 @@ pub enum EncodeError {
     ContactsRowsMismatch {
         count: u32,
         rows: usize,
+    },
+    /// The chain refusals, sending side - exactly what decode refuses.
+    RezSegmentCountOutOfRange {
+        count: u32,
+    },
+    RezSpacingInvalid,
+    SegmentCountOutOfRange {
+        creature_id: u32,
+        count: u32,
+    },
+    TickStateNotFinite {
+        creature_id: u32,
+    },
+    SegmentSlotNotZero {
+        creature_id: u32,
     },
     InvalidGrounded(u8),
     ProprioceptionNotFinite,
@@ -362,6 +398,8 @@ fn decode_rez(payload: &[u8]) -> Result<Message, DecodeError> {
         vertex_count: read_u32(payload, 20),
         triangle_count: read_u32(payload, 24),
         material_count: read_u32(payload, 28),
+        segment_count: read_u32(payload, 32),
+        segment_spacing: read_f32(payload, 36),
     };
 
     if header.vertex_count > REZ_MAX_VERTICES || header.triangle_count > REZ_MAX_TRIANGLES || header.material_count > REZ_MAX_MATERIALS {
@@ -382,6 +420,12 @@ fn decode_rez(payload: &[u8]) -> Result<Message, DecodeError> {
 
     if !header.max_forward_speed.is_finite() || !header.max_turn_rate.is_finite() || !header.max_vocalisation_strength.is_finite() {
         return Err(DecodeError::RezNotFinite);
+    }
+    if header.segment_count == 0 || header.segment_count > SEGMENTS_MAX {
+        return Err(DecodeError::RezSegmentCountOutOfRange { count: header.segment_count });
+    }
+    if !spacing_fits(header.segment_count, header.segment_spacing) {
+        return Err(DecodeError::RezSpacingInvalid);
     }
 
     let mut at = REZ_HEADER_BYTES;
@@ -502,6 +546,44 @@ fn decode_proprioception(payload: &[u8]) -> Result<Message, DecodeError> {
     })
 }
 
+/// The spacing rule: finite always; zero for a chain of one, strictly positive otherwise.
+fn spacing_fits(segment_count: u32, spacing: f32) -> bool {
+    spacing.is_finite() && if segment_count > 1 { spacing > 0.0 } else { spacing == 0.0 }
+}
+
+/// The head's nine floats and every trailing pose in wire order, for the finiteness judgement.
+fn state_floats(state: &CreatureState) -> impl Iterator<Item = f32> + '_ {
+    state
+        .position
+        .iter()
+        .copied()
+        .chain(std::iter::once(state.yaw))
+        .chain(state.velocity.iter().copied())
+        .chain([state.yaw_rate, state.vocalisation])
+        .chain(state.segments.iter().flat_map(|pose| pose.position.iter().copied().chain(std::iter::once(pose.yaw))))
+}
+
+/// The chain rules of one row, both ways: a count in range, every float finite, every slot
+/// beyond the chain all zero.
+fn judge_state(state: &CreatureState) -> Result<(), (u32, u32)> {
+    // The pair names the refusal: (kind, count) with kind 1 = count out of range, 2 = not
+    // finite, 3 = a slot not zero; the caller turns it into its own error vocabulary.
+    if state.segment_count == 0 || state.segment_count > SEGMENTS_MAX {
+        return Err((1, state.segment_count));
+    }
+    if state_floats(state).any(|value| !value.is_finite()) {
+        return Err((2, 0));
+    }
+    let meaningful = (state.segment_count - 1) as usize;
+    if state.segments[meaningful..]
+        .iter()
+        .any(|pose| pose.position.iter().any(|axis| axis.to_bits() != 0) || pose.yaw.to_bits() != 0)
+    {
+        return Err((3, 0));
+    }
+    Ok(())
+}
+
 fn decode_tick_state(payload: &[u8]) -> Result<Message, DecodeError> {
     let count = read_u32(payload, 8);
     if payload[12..16] != [0u8; 4] {
@@ -515,14 +597,37 @@ fn decode_tick_state(payload: &[u8]) -> Result<Message, DecodeError> {
     let mut states = Vec::with_capacity(rows_by_length);
     for row in 0..rows_by_length {
         let at = TICK_HEADER_BYTES + row * CREATURE_STATE_BYTES;
-        states.push(CreatureState {
+        let mut state = CreatureState {
             creature_id: read_u32(payload, at),
             position: [read_f32(payload, at + 4), read_f32(payload, at + 8), read_f32(payload, at + 12)],
             yaw: read_f32(payload, at + 16),
             velocity: [read_f32(payload, at + 20), read_f32(payload, at + 24), read_f32(payload, at + 28)],
             yaw_rate: read_f32(payload, at + 32),
             vocalisation: read_f32(payload, at + 36),
-        });
+            segment_count: read_u32(payload, at + 40),
+            segments: [SegmentPose::default(); TRAILING_SEGMENTS_MAX],
+        };
+        for (slot, pose) in state.segments.iter_mut().enumerate() {
+            let base = at + 44 + slot * size_of::<SegmentPose>();
+            pose.position = [read_f32(payload, base), read_f32(payload, base + 4), read_f32(payload, base + 8)];
+            pose.yaw = read_f32(payload, base + 12);
+        }
+        match judge_state(&state) {
+            Ok(()) => {}
+            Err((1, count)) => {
+                return Err(DecodeError::SegmentCountOutOfRange {
+                    creature_id: state.creature_id,
+                    count,
+                });
+            }
+            Err((2, _)) => {
+                return Err(DecodeError::TickStateNotFinite { creature_id: state.creature_id });
+            }
+            Err(_) => {
+                return Err(DecodeError::SegmentSlotNotZero { creature_id: state.creature_id });
+            }
+        }
+        states.push(state);
     }
     Ok(Message::TickState {
         header: TickStateHeader {
@@ -578,6 +683,12 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             if !header.max_forward_speed.is_finite() || !header.max_turn_rate.is_finite() || !header.max_vocalisation_strength.is_finite() {
                 return Err(EncodeError::RezNotFinite);
             }
+            if header.segment_count == 0 || header.segment_count > SEGMENTS_MAX {
+                return Err(EncodeError::RezSegmentCountOutOfRange { count: header.segment_count });
+            }
+            if !spacing_fits(header.segment_count, header.segment_spacing) {
+                return Err(EncodeError::RezSpacingInvalid);
+            }
             for (index, triangle) in triangles.iter().enumerate() {
                 if triangle.vertices.iter().any(|vertex| *vertex >= header.vertex_count) || triangle.material >= header.material_count {
                     #[allow(clippy::cast_possible_truncation)]
@@ -616,6 +727,8 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             out.extend_from_slice(&header.vertex_count.to_le_bytes());
             out.extend_from_slice(&header.triangle_count.to_le_bytes());
             out.extend_from_slice(&header.material_count.to_le_bytes());
+            out.extend_from_slice(&header.segment_count.to_le_bytes());
+            out.extend_from_slice(&header.segment_spacing.to_le_bytes());
             for vertex in vertices {
                 for axis in vertex.position {
                     out.extend_from_slice(&axis.to_le_bytes());
@@ -653,6 +766,23 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
                     rows: states.len(),
                 });
             }
+            for state in states {
+                match judge_state(state) {
+                    Ok(()) => {}
+                    Err((1, count)) => {
+                        return Err(EncodeError::SegmentCountOutOfRange {
+                            creature_id: state.creature_id,
+                            count,
+                        });
+                    }
+                    Err((2, _)) => {
+                        return Err(EncodeError::TickStateNotFinite { creature_id: state.creature_id });
+                    }
+                    Err(_) => {
+                        return Err(EncodeError::SegmentSlotNotZero { creature_id: state.creature_id });
+                    }
+                }
+            }
             frame_header(out, MessageType::TickState, TICK_HEADER_BYTES + states.len() * CREATURE_STATE_BYTES);
             out.extend_from_slice(&header.tick.to_le_bytes());
             out.extend_from_slice(&header.creature_count.to_le_bytes());
@@ -668,6 +798,13 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
                 }
                 out.extend_from_slice(&state.yaw_rate.to_le_bytes());
                 out.extend_from_slice(&state.vocalisation.to_le_bytes());
+                out.extend_from_slice(&state.segment_count.to_le_bytes());
+                for pose in &state.segments {
+                    for axis in pose.position {
+                        out.extend_from_slice(&axis.to_le_bytes());
+                    }
+                    out.extend_from_slice(&pose.yaw.to_le_bytes());
+                }
             }
         }
         Message::Actions(actions) => {
@@ -811,6 +948,8 @@ mod tests {
             vertex_count: vertices,
             triangle_count: triangles,
             material_count: materials,
+            segment_count: 1,
+            segment_spacing: 0.0,
         };
         Message::Rez {
             header,
@@ -833,6 +972,29 @@ mod tests {
                     transmission: 0.0,
                 })
                 .collect(),
+        }
+    }
+
+    /// A worm: the sample body, eight segments half a metre apart.
+    fn chained_rez() -> Message {
+        let Message::Rez {
+            header,
+            vertices,
+            triangles,
+            materials,
+        } = sample_rez(4, 2, 1)
+        else {
+            unreachable!()
+        };
+        Message::Rez {
+            header: Rez {
+                segment_count: SEGMENTS_MAX,
+                segment_spacing: 0.54,
+                ..header
+            },
+            vertices,
+            triangles,
+            materials,
         }
     }
 
@@ -859,6 +1021,18 @@ mod tests {
         }
     }
 
+    /// A chain of `count` segments behind a head: every meaningful slot distinct, the rest zero.
+    fn chain(count: u32) -> [SegmentPose; TRAILING_SEGMENTS_MAX] {
+        let mut segments = [SegmentPose::default(); TRAILING_SEGMENTS_MAX];
+        for (slot, pose) in segments.iter_mut().enumerate().take((count - 1) as usize) {
+            *pose = SegmentPose {
+                position: [slot as f32, 2.0, 3.0 + slot as f32 * 0.5],
+                yaw: 0.1 * slot as f32,
+            };
+        }
+        segments
+    }
+
     fn sample_tick_state(rows: u32) -> Message {
         let states = (0..rows)
             .map(|index| CreatureState {
@@ -868,6 +1042,9 @@ mod tests {
                 velocity: [-1.0, 0.0, 4.5],
                 yaw_rate: -0.25,
                 vocalisation: 0.75,
+                // Chains of every length across the rows, the single body among them.
+                segment_count: 1 + (index % SEGMENTS_MAX),
+                segments: chain(1 + (index % SEGMENTS_MAX)),
             })
             .collect();
         Message::TickState {
@@ -886,6 +1063,7 @@ mod tests {
             sample_rez(0, 0, 0),
             sample_rez(4, 2, 1),
             sample_rez(REZ_MAX_VERTICES, REZ_MAX_TRIANGLES, REZ_MAX_MATERIALS),
+            chained_rez(),
             sample_proprioception(0),
             sample_proprioception(2),
             sample_proprioception(CONTACTS_MAX),
@@ -1106,7 +1284,8 @@ mod tests {
     #[test]
     fn the_receive_buffer_constant_really_is_the_largest_legal_frame() {
         // Since protocol v4 the largest legal frame is a full REZ, not a full tick: the body
-        // outweighs the world, and the receive buffer is sized by whichever is larger.
+        // outweighs the world, and the receive buffer is sized by whichever is larger. v7's
+        // chains grew the tick to 39,952 bytes; a maximal REZ is 45,600, so the premise holds.
         let largest_rez = frame_of(&sample_rez(REZ_MAX_VERTICES, REZ_MAX_TRIANGLES, REZ_MAX_MATERIALS));
         let largest_tick = frame_of(&sample_tick_state(TICK_STATE_MAX_CREATURES));
         assert_eq!(largest_rez.len().max(largest_tick.len()), max_frame_bytes());
@@ -1337,6 +1516,140 @@ mod tests {
                 &mut out
             ),
             Err(EncodeError::RezNotFinite)
+        );
+    }
+
+    #[test]
+    fn a_chain_is_refused_by_name_both_ways() {
+        // A REZ: no segments, too many, a spacing that is not a number, a chain with no spacing,
+        // a single body with a spacing.
+        let Message::Rez { header, .. } = sample_rez(4, 2, 1) else { unreachable!() };
+        for (count, spacing, refusal) in [
+            (0u32, 0.0f32, EncodeError::RezSegmentCountOutOfRange { count: 0 }),
+            (SEGMENTS_MAX + 1, 0.5, EncodeError::RezSegmentCountOutOfRange { count: SEGMENTS_MAX + 1 }),
+            (3, f32::NAN, EncodeError::RezSpacingInvalid),
+            (3, 0.0, EncodeError::RezSpacingInvalid),
+            (3, -0.5, EncodeError::RezSpacingInvalid),
+            (1, 0.5, EncodeError::RezSpacingInvalid),
+        ] {
+            let lying = Message::Rez {
+                header: Rez {
+                    segment_count: count,
+                    segment_spacing: spacing,
+                    vertex_count: 0,
+                    triangle_count: 0,
+                    material_count: 0,
+                    ..header
+                },
+                vertices: Vec::new(),
+                triangles: Vec::new(),
+                materials: Vec::new(),
+            };
+            let mut out = Vec::new();
+            assert_eq!(encode(&lying, &mut out), Err(refusal), "count {count} spacing {spacing}");
+            assert!(out.is_empty());
+            // The same lie on the wire, patched into an honest bodiless frame.
+            let mut payload = frame_of(&sample_rez(0, 0, 0))[FRAME_HEADER_BYTES..].to_vec();
+            payload[32..36].copy_from_slice(&count.to_le_bytes());
+            payload[36..40].copy_from_slice(&spacing.to_le_bytes());
+            let decoded = decode(MessageType::Rez as u8, &payload);
+            match refusal {
+                EncodeError::RezSegmentCountOutOfRange { count } => {
+                    assert_eq!(decoded, Err(DecodeError::RezSegmentCountOutOfRange { count }));
+                }
+                _ => assert_eq!(decoded, Err(DecodeError::RezSpacingInvalid)),
+            }
+        }
+
+        // A TICK_STATE row: no segments, too many, a NaN in a trailing pose, a slot beyond the
+        // chain that is not zero.
+        let Message::TickState { header, states } = sample_tick_state(1) else {
+            unreachable!()
+        };
+        let honest = states[0];
+        let poisoned = {
+            let mut row = CreatureState {
+                segment_count: 3,
+                segments: chain(3),
+                ..honest
+            };
+            row.segments[1].yaw = f32::NAN;
+            row
+        };
+        let dirty = {
+            let mut row = CreatureState {
+                segment_count: 2,
+                segments: chain(2),
+                ..honest
+            };
+            row.segments[5].position[0] = 1.0e-45; // one bit, in a slot the chain does not reach
+            row
+        };
+        for (row, refusal) in [
+            (
+                CreatureState {
+                    segment_count: 0,
+                    segments: chain(1),
+                    ..honest
+                },
+                EncodeError::SegmentCountOutOfRange { creature_id: 0, count: 0 },
+            ),
+            (
+                CreatureState {
+                    segment_count: SEGMENTS_MAX + 1,
+                    segments: chain(SEGMENTS_MAX),
+                    ..honest
+                },
+                EncodeError::SegmentCountOutOfRange {
+                    creature_id: 0,
+                    count: SEGMENTS_MAX + 1,
+                },
+            ),
+            (poisoned, EncodeError::TickStateNotFinite { creature_id: 0 }),
+            (dirty, EncodeError::SegmentSlotNotZero { creature_id: 0 }),
+        ] {
+            let lying = Message::TickState { header, states: vec![row] };
+            let mut out = Vec::new();
+            assert_eq!(encode(&lying, &mut out), Err(refusal));
+            assert!(out.is_empty(), "nothing is written before a refusal");
+        }
+        // On the wire: an honest frame patched at the count, at a trailing yaw, at a dead slot.
+        let honest_frame = frame_of(&Message::TickState {
+            header,
+            states: vec![CreatureState {
+                segment_count: 2,
+                segments: chain(2),
+                ..honest
+            }],
+        });
+        let row_at = FRAME_HEADER_BYTES + TICK_HEADER_BYTES;
+        let mut over = honest_frame.clone();
+        over[row_at + 40..row_at + 44].copy_from_slice(&(SEGMENTS_MAX + 1).to_le_bytes());
+        assert_eq!(
+            decode(MessageType::TickState as u8, &over[FRAME_HEADER_BYTES..]),
+            Err(DecodeError::SegmentCountOutOfRange {
+                creature_id: 0,
+                count: SEGMENTS_MAX + 1
+            })
+        );
+        let mut nan = honest_frame.clone();
+        nan[row_at + 44 + 12..row_at + 44 + 16].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert_eq!(
+            decode(MessageType::TickState as u8, &nan[FRAME_HEADER_BYTES..]),
+            Err(DecodeError::TickStateNotFinite { creature_id: 0 })
+        );
+        let mut dead = honest_frame.clone();
+        dead[row_at + 44 + 16 * 4] = 1; // the fifth slot's first byte
+        assert_eq!(
+            decode(MessageType::TickState as u8, &dead[FRAME_HEADER_BYTES..]),
+            Err(DecodeError::SegmentSlotNotZero { creature_id: 0 })
+        );
+        // And the honest one, with a head whose position is a NaN: the head is judged too.
+        let mut head = honest_frame;
+        head[row_at + 4..row_at + 8].copy_from_slice(&f32::INFINITY.to_le_bytes());
+        assert_eq!(
+            decode(MessageType::TickState as u8, &head[FRAME_HEADER_BYTES..]),
+            Err(DecodeError::TickStateNotFinite { creature_id: 0 })
         );
     }
 

@@ -83,7 +83,7 @@ impl End {
 
 /// `LNK_CLIENT_ABI_VERSION`: bumped whenever the vtable or its rules change. The twin lives in
 /// `lnk_client.h`, and a test holds the two together.
-pub const LNK_CLIENT_ABI_VERSION: u32 = 6;
+pub const LNK_CLIENT_ABI_VERSION: u32 = 7;
 
 pub type LnkStatus = i32;
 
@@ -1094,6 +1094,8 @@ mod tests {
                     velocity: [0.0, 0.0, 0.0],
                     yaw_rate: 0.0,
                     vocalisation: 0.0,
+                    segment_count: 1,
+                    segments: [crate::protocol::SegmentPose::default(); crate::protocol::TRAILING_SEGMENTS_MAX],
                 },
                 CreatureState {
                     creature_id: 1,
@@ -1102,6 +1104,8 @@ mod tests {
                     velocity: [1.0, 0.0, 0.0],
                     yaw_rate: 0.5,
                     vocalisation: 0.75,
+                    segment_count: 1,
+                    segments: [crate::protocol::SegmentPose::default(); crate::protocol::TRAILING_SEGMENTS_MAX],
                 },
             ];
             connection
@@ -1427,6 +1431,8 @@ mod tests {
                 velocity: [0.0; 3],
                 yaw_rate: 0.0,
                 vocalisation: 0.0,
+                segment_count: 1,
+                segments: [crate::protocol::SegmentPose::default(); crate::protocol::TRAILING_SEGMENTS_MAX],
             },
             CreatureState {
                 creature_id: 7,
@@ -1435,6 +1441,8 @@ mod tests {
                 velocity: [1.0, 0.0, 0.0],
                 yaw_rate: 0.1,
                 vocalisation: 0.9,
+                segment_count: 1,
+                segments: [crate::protocol::SegmentPose::default(); crate::protocol::TRAILING_SEGMENTS_MAX],
             },
         ];
         let header = TickStateHeader {
@@ -1477,6 +1485,8 @@ mod tests {
             vertex_count: 0,
             triangle_count: 0,
             material_count: 0,
+            segment_count: 1,
+            segment_spacing: 0.0,
         }
     }
 
@@ -1913,6 +1923,8 @@ mod tests {
             velocity: [0.0; 3],
             yaw_rate: 0.0,
             vocalisation: 0.0,
+            segment_count: 1,
+            segments: [crate::protocol::SegmentPose::default(); crate::protocol::TRAILING_SEGMENTS_MAX],
         }];
         let header = TickStateHeader {
             tick: 501,
@@ -1992,6 +2004,8 @@ mod tests {
             velocity: [0.0; 3],
             yaw_rate: 0.0,
             vocalisation: 0.0,
+            segment_count: 1,
+            segments: [crate::protocol::SegmentPose::default(); crate::protocol::TRAILING_SEGMENTS_MAX],
         }];
         let over_cap = TickStateHeader {
             tick: 1,

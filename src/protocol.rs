@@ -20,7 +20,7 @@ compile_error!("The Link protocol is little-endian on the wire; a big-endian hos
 /// `LNK_PROTOCOL_VERSION`: bumped whenever any declaration changes meaning or layout. The
 /// handshake carries the header's fingerprint rather than this number; the number exists for
 /// the human-readable refusal.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// `LNK_DEFAULT_PORT`: where Master Control listens when nobody names another port. A default
 /// and only a default. The number is the owner's: 30702, from JA-307020 — Tron's program
@@ -195,6 +195,12 @@ pub struct Rez {
     pub vertex_count: u32,
     pub triangle_count: u32,
     pub material_count: u32,
+    /// Segments in this creature's chain, the head counted: 1 for a single rigid body, at most
+    /// [`SEGMENTS_MAX`]. Every segment wears the one model these rows describe.
+    pub segment_count: u32,
+    /// Metres between consecutive segments' origins along the head's path; zero for a chain of
+    /// one, strictly positive and finite otherwise - refused by name either way.
+    pub segment_spacing: f32,
 }
 
 /// One vertex position in body frame, metres.
@@ -228,8 +234,30 @@ pub const REZ_MAX_VERTICES: u32 = 1_024;
 pub const REZ_MAX_TRIANGLES: u32 = 2_048;
 pub const REZ_MAX_MATERIALS: u32 = 16;
 
-/// One creature's row in a TICK_STATE: pose, velocity and actuator. Forty bytes, which is what
-/// makes a dozen creatures ~500 bytes per tick.
+/// The most segments one creature's chain may have, the head counted: a chain is the head -
+/// today's rigid body - and up to seven trailing segments the world places along the head's
+/// recorded path (protocol v7; TOPOLOGY.md § The chain). Eight is a worm of eight icosahedra,
+/// and eight rows of sixteen bytes keep a full TICK_STATE under a maximal REZ.
+pub const SEGMENTS_MAX: u32 = 8;
+/// The trailing segments a [`CreatureState`] row carries: every segment but the head.
+pub const TRAILING_SEGMENTS_MAX: usize = (SEGMENTS_MAX - 1) as usize;
+
+/// One trailing segment's pose: where it is and which way it faces, world space, the head's
+/// conventions. Sixteen bytes, no padding.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct SegmentPose {
+    /// Metres, world space, right-handed, Y up.
+    pub position: [f32; 3],
+    /// Radians about +Y, right-handed.
+    pub yaw: f32,
+}
+
+/// One creature's row in a TICK_STATE: the head's pose, velocity and actuator, then the chain -
+/// how many segments the creature has and the poses of every trailing one, in a fixed array
+/// so a row is always the same 156 bytes and every consumer copies rows by count. The slots
+/// beyond `segment_count - 1` are zero, and a nonzero one is refused: the bytes of a tick are
+/// hashed and recorded, and a slot nobody means must not carry whatever was in memory.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct CreatureState {
@@ -245,6 +273,10 @@ pub struct CreatureState {
     pub yaw_rate: f32,
     /// The voice actuator as physics settled it, 0 when silent.
     pub vocalisation: f32,
+    /// Segments in the chain, the head counted: 1 to [`SEGMENTS_MAX`].
+    pub segment_count: u32,
+    /// The trailing segments' poses, `segment_count - 1` of them meaningful, the rest zero.
+    pub segments: [SegmentPose; TRAILING_SEGMENTS_MAX],
 }
 
 /// TICK_STATE, server to every client, every tick: the whole settled world, no deltas, no acks.
@@ -392,7 +424,8 @@ pub const fn exact_payload_bytes(message: MessageType) -> Option<usize> {
 const _: () = assert!(size_of::<Hello>() == 4 + 32 + 1 + 3 + 8 && size_of::<Hello>() == 48);
 const _: () = assert!(size_of::<Welcome>() == 8 + 4 + 4 + 8 && size_of::<Welcome>() == 24);
 const _: () = assert!(size_of::<WorldDefinition>() == 10 * 4 && size_of::<WorldDefinition>() == 40);
-const _: () = assert!(size_of::<Rez>() == 8 * 4 && size_of::<Rez>() == 32);
+const _: () = assert!(size_of::<Rez>() == 10 * 4 && size_of::<Rez>() == 40);
+const _: () = assert!(size_of::<SegmentPose>() == 12 + 4 && size_of::<SegmentPose>() == 16);
 const _: () = assert!(size_of::<RezVertex>() == 12 && size_of::<RezTriangle>() == 16 && size_of::<RezMaterial>() == 32);
 const _: () = assert!(
     size_of::<Rez>()
@@ -401,7 +434,7 @@ const _: () = assert!(
         + REZ_MAX_MATERIALS as usize * size_of::<RezMaterial>()
         <= FRAME_PAYLOAD_LIMIT
 );
-const _: () = assert!(size_of::<CreatureState>() == 4 + 12 + 4 + 12 + 4 + 4 && size_of::<CreatureState>() == 40);
+const _: () = assert!(size_of::<CreatureState>() == 4 + 12 + 4 + 12 + 4 + 4 + 4 + TRAILING_SEGMENTS_MAX * 16 && size_of::<CreatureState>() == 156);
 const _: () = assert!(size_of::<TickStateHeader>() == 8 + 4 + 4 && size_of::<TickStateHeader>() == 16);
 const _: () = assert!(size_of::<Actions>() == 8 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 4 && size_of::<Actions>() == 40);
 const _: () = assert!(size_of::<Event>() == 8 + 12 + 4 + 4 + 1 + 3 && size_of::<Event>() == 32);
@@ -448,13 +481,19 @@ mod tests {
     }
 
     #[test]
-    fn a_full_tick_state_fits_one_frame_with_room_to_grow() {
+    fn a_full_tick_state_fits_one_frame_and_a_maximal_rez_still_outweighs_it() {
+        // Since v7 a row carries its chain, so a full tick is 39,952 bytes rather than 10,256:
+        // it fits one frame, and a maximal REZ (45,600) is still the frame the receive buffer
+        // is sized by. The headroom the cap once had to quadruple is spent; the framing is now
+        // exactly as interesting as TOPOLOGY.md's delta-compression trigger says it may become.
         let full = size_of::<TickStateHeader>() + TICK_STATE_MAX_CREATURES as usize * size_of::<CreatureState>();
-        assert_eq!(full, 10_256);
-        assert!(
-            full * 4 <= FRAME_PAYLOAD_LIMIT,
-            "the cap is meant to be able to quadruple before the framing is interesting"
-        );
+        assert_eq!(full, 39_952);
+        assert!(full <= FRAME_PAYLOAD_LIMIT);
+        let rez = size_of::<Rez>()
+            + REZ_MAX_VERTICES as usize * size_of::<RezVertex>()
+            + REZ_MAX_TRIANGLES as usize * size_of::<RezTriangle>()
+            + REZ_MAX_MATERIALS as usize * size_of::<RezMaterial>();
+        assert!(rez > full, "the premise the receive buffer rests on: a full body outweighs a full tick");
     }
 
     #[test]
@@ -465,7 +504,7 @@ mod tests {
         assert_eq!(Role::Spectator as u8, 1);
         assert_eq!(Role::CreatureHost as u8, 2);
         assert_eq!(EventKind::Vocalisation as u8, 1);
-        assert_eq!(PROTOCOL_VERSION, 6);
+        assert_eq!(PROTOCOL_VERSION, 7);
         assert_eq!(DEFAULT_PORT, 30_702);
     }
 
@@ -503,6 +542,7 @@ mod tests {
             header.contains(&format!("#define LNK_REZ_MAX_MATERIALS {REZ_MAX_MATERIALS}u")),
             "LNK_REZ_MAX_MATERIALS drifted"
         );
+        assert!(header.contains(&format!("#define LNK_SEGMENTS_MAX {SEGMENTS_MAX}u")), "LNK_SEGMENTS_MAX drifted");
     }
 
     #[test]

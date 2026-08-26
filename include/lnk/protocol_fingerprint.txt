@@ -1,4 +1,4 @@
 # Fingerprint of lnk_protocol.h with the LNK_PROTOCOL_VERSION line removed.
 # Regenerate with: python tools/check_protocol_version.py update
-version=6
-sha256=52857a0a72b22b99b0689d7dfddeeb9c0baada1949f302969648809c19b07bd3
+version=7
+sha256=75db14fcfa6e98155353b918b25c8e7060fae10d7e1736247a66d86de312372a

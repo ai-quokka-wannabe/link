@@ -49,7 +49,7 @@ extern "C"
     carries the header's fingerprint rather than this number, so two ends disagreeing about the
     bytes are refused even when they agree about the number; the number exists for the
     human-readable refusal. */
-#define LNK_PROTOCOL_VERSION 6u
+#define LNK_PROTOCOL_VERSION 7u
 
 /*! The port Master Control listens on when nobody names another - a default and only a
     default: the client's positional argument carries any host and port, and Master Control
@@ -206,6 +206,12 @@ typedef struct LnkWelcome {
     day the sense spec moves server-side (the integrity ladder's last rung) it arrives as its
     own message, not as freight on this one. A model of zero triangles is a legitimate bodiless
     creature; its three counts are all zero and no rows follow.
+
+    Since v7 the header also names the chain (the owner's ruling, 2026-08-26): how many
+    segments the creature has, the head counted, and how far apart their origins sit along the
+    head's path. Every segment wears this one model; the world places the trailing ones, and a
+    TICK_STATE row carries their poses. The joint between two segments is authored into the
+    model - a stub on each of the two spikes that meet - so the wire carries no joint geometry.
 */
 typedef struct LnkRez {
     uint32_t creature_id;
@@ -216,6 +222,9 @@ typedef struct LnkRez {
     uint32_t vertex_count;         /*!< Rows of LnkRezVertex following this header. */
     uint32_t triangle_count;       /*!< Rows of LnkRezTriangle after the vertices. */
     uint32_t material_count;       /*!< Rows of LnkRezMaterial after the triangles. */
+    uint32_t segment_count;        /*!< Segments in the chain, the head counted: 1 to LNK_SEGMENTS_MAX. */
+    float segment_spacing;         /*!< Metres between consecutive segments' origins along the head's path;
+                                        zero for a chain of one, strictly positive and finite otherwise. */
 } LnkRez;
 
 /*! One vertex position in body frame, metres. */
@@ -245,8 +254,27 @@ typedef struct LnkRezMaterial {
 #define LNK_REZ_MAX_TRIANGLES 2048u
 #define LNK_REZ_MAX_MATERIALS 16u
 
-/*! One creature's row in a TICK_STATE: pose, velocity and actuator, tick-stamped by the frame's
-    header struct. Forty bytes, which is what makes a dozen creatures ~500 bytes per tick. */
+/*! The most segments one creature's chain may have, the head counted (protocol v7). A chain is
+    the head - the one rigid body physics steps - and up to seven trailing segments the world
+    places along the head's recorded path, every one wearing the REZ's model; the joint between
+    two segments is authored into the model itself, so the wire carries poses and nothing else.
+    Eight is a worm of eight icosahedra, and eight rows of sixteen bytes keep a full TICK_STATE
+    under a maximal REZ. */
+#define LNK_SEGMENTS_MAX 8u
+
+/*! One trailing segment's pose: where it is and which way it faces, world space, the head's
+    conventions. Sixteen bytes. */
+typedef struct LnkSegmentPose {
+    float position[3];      /*!< Metres, world space, right-handed, Y up. */
+    float yaw;              /*!< Radians about +Y, right-handed. */
+} LnkSegmentPose;
+
+/*! One creature's row in a TICK_STATE: the head's pose, velocity and actuator, tick-stamped by
+    the frame's header struct, then the chain - how many segments the creature has and the
+    poses of every trailing one, in a fixed array so a row is always the same 156 bytes and every
+    consumer copies rows by count. The slots beyond segment_count - 1 are zero, and a nonzero one
+    is refused: the bytes of a tick are hashed and recorded, and a slot nobody means must not
+    carry whatever was in memory. Every float is finite or the row is refused. */
 typedef struct LnkCreatureState {
     uint32_t creature_id;   /*!< Stable for the creature's whole rez-to-derez life. */
     float position[3];      /*!< Metres, world space, right-handed, Y up. */
@@ -254,6 +282,8 @@ typedef struct LnkCreatureState {
     float velocity[3];      /*!< Metres per second, world space. */
     float yaw_rate;         /*!< Radians per second about +Y. */
     float vocalisation;     /*!< The voice actuator as physics settled it, 0 when silent. */
+    uint32_t segment_count; /*!< Segments in the chain, the head counted: 1 to LNK_SEGMENTS_MAX. */
+    LnkSegmentPose segments[LNK_SEGMENTS_MAX - 1u]; /*!< The trailing segments' poses, segment_count - 1 meaningful, the rest zero. */
 } LnkCreatureState;
 
 /*! TICK_STATE, server to every client, every tick: the whole settled world, no deltas, no acks.
@@ -267,8 +297,9 @@ typedef struct LnkTickStateHeader {
 } LnkTickStateHeader;
 
 /*! The most creatures one TICK_STATE may carry. A cap rather than a target: v1's world is a
-    dozen creatures, and 256 rows is 10,256 bytes of payload against the framing's 65,535
-    ceiling, so the cap can quadruple before the framing is even interesting. */
+    dozen creatures. Since v7 a row carries its chain, so 256 rows is 39,952 bytes of payload
+    against the framing's 65,535 ceiling - it fits, and a maximal REZ is still the larger frame;
+    the headroom the cap once had to quadruple was spent on the chain, deliberately. */
 #define LNK_TICK_STATE_MAX_CREATURES 256u
 
 /*! ACTIONS, creature host to server: the Program's staged intent for a future tick - the twelve
@@ -415,6 +446,7 @@ LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkWorldDefinition, floor_cells) + LNK_MEMBER
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkRez, creature_id) + LNK_MEMBER_BYTES(LnkRez, max_forward_speed) + LNK_MEMBER_BYTES(LnkRez, max_turn_rate)
                           + LNK_MEMBER_BYTES(LnkRez, max_vocalisation_strength) + LNK_MEMBER_BYTES(LnkRez, max_contact_count)
                           + LNK_MEMBER_BYTES(LnkRez, vertex_count) + LNK_MEMBER_BYTES(LnkRez, triangle_count) + LNK_MEMBER_BYTES(LnkRez, material_count)
+                          + LNK_MEMBER_BYTES(LnkRez, segment_count) + LNK_MEMBER_BYTES(LnkRez, segment_spacing)
                       == sizeof(LnkRez),
                   "LnkRez has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkRezVertex, position) == sizeof(LnkRezVertex), "LnkRezVertex has padding: a member changed width.");
@@ -426,9 +458,12 @@ LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkRezMaterial, colour) + LNK_MEMBER_BYTES(Ln
                   "LnkRezMaterial has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkCreatureState, creature_id) + LNK_MEMBER_BYTES(LnkCreatureState, position) + LNK_MEMBER_BYTES(LnkCreatureState, yaw)
                           + LNK_MEMBER_BYTES(LnkCreatureState, velocity) + LNK_MEMBER_BYTES(LnkCreatureState, yaw_rate)
-                          + LNK_MEMBER_BYTES(LnkCreatureState, vocalisation)
+                          + LNK_MEMBER_BYTES(LnkCreatureState, vocalisation) + LNK_MEMBER_BYTES(LnkCreatureState, segment_count)
+                          + LNK_MEMBER_BYTES(LnkCreatureState, segments)
                       == sizeof(LnkCreatureState),
                   "LnkCreatureState has padding: a member changed width.");
+LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkSegmentPose, position) + LNK_MEMBER_BYTES(LnkSegmentPose, yaw) == sizeof(LnkSegmentPose),
+                  "LnkSegmentPose has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkTickStateHeader, tick) + LNK_MEMBER_BYTES(LnkTickStateHeader, creature_count)
                           + LNK_MEMBER_BYTES(LnkTickStateHeader, reserved0)
                       == sizeof(LnkTickStateHeader),
@@ -451,10 +486,11 @@ LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkPong, nonce) == sizeof(LnkPong), "LnkPong 
 LNK_STATIC_ASSERT(sizeof(LnkHello) == 48u, "LnkHello must be 48 bytes: version, fingerprint, role, reserved, world fingerprint.");
 LNK_STATIC_ASSERT(sizeof(LnkWelcome) == 24u, "LnkWelcome must be 24 bytes: tick, dt, client id, world fingerprint.");
 LNK_STATIC_ASSERT(sizeof(LnkWorldDefinition) == 40u, "LnkWorldDefinition must be 40 bytes: the floor's eight numbers, dt, and the standing height.");
-LNK_STATIC_ASSERT(sizeof(LnkRez) == 32u, "LnkRez must be 32 bytes: identity, the bounds, the contact budget, three counts.");
+LNK_STATIC_ASSERT(sizeof(LnkRez) == 40u, "LnkRez must be 40 bytes: identity, the bounds, the contact budget, three counts, the chain's count and spacing.");
 LNK_STATIC_ASSERT(sizeof(LnkRezVertex) == 12u && sizeof(LnkRezTriangle) == 16u && sizeof(LnkRezMaterial) == 32u,
                   "The REZ rows must stay exactly the sizes the length rule multiplies by.");
-LNK_STATIC_ASSERT(sizeof(LnkCreatureState) == 40u, "LnkCreatureState must be 40 bytes: id, pose, velocity, voice.");
+LNK_STATIC_ASSERT(sizeof(LnkSegmentPose) == 16u, "LnkSegmentPose must be 16 bytes: position, yaw.");
+LNK_STATIC_ASSERT(sizeof(LnkCreatureState) == 156u, "LnkCreatureState must be 156 bytes: id, pose, velocity, voice, the chain's count and seven poses.");
 LNK_STATIC_ASSERT(sizeof(LnkTickStateHeader) == 16u, "LnkTickStateHeader must be 16 bytes: tick, count, reserved.");
 LNK_STATIC_ASSERT(sizeof(LnkActions) == 40u,
                   "LnkActions must be 40 bytes: tick, id, TglActions' twelve, the previous tick's twelve resent, and a counted reserved word.");

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The chain, on the wire: protocol v7.** The owner's ruling (2026-08-26): a worm is a chain
+  of icosahedra joined spike to spike, and it undulates. The wire's part: a `REZ` names how
+  many segments its creature has (`segment_count`, the head counted, one to
+  `LNK_SEGMENTS_MAX` = 8) and how far apart their origins sit along the head's path
+  (`segment_spacing`, zero for a single body, strictly positive and finite otherwise); a
+  `TICK_STATE` row carries, after the head's pose, velocity and voice, the chain's count and a
+  fixed array of seven `LnkSegmentPose` (position and yaw) - so a row is always 156 bytes and
+  every consumer keeps copying rows by count, the Disk and its reader included. The slots
+  beyond the chain are zero and a nonzero one is refused, because a tick's bytes are hashed
+  and recorded; every float in a row, the head's included, must now be finite. Refused by name
+  both ways: a chain of none or of nine, a spacing that lies, a NaN pose, a dirty slot. A full
+  tick is 39,952 bytes - it fits one frame, and a maximal REZ still outweighs it. The client
+  ABI moves to 7 with the structs it passes; the fingerprint moved with the version, so every
+  Disk of v6 is history. The world's part (trailing segments placed along the head's recorded
+  path), the Grid's (a model per segment pose) and the worm's (the two joint spikes) are the
+  companion pull requests.
 - **The toolchain is pinned in one place, and CI says so.** Adopted from the owner's
   `setonix-os`: `.github/scripts/check-toolchain-pin.sh` in quick-checks refuses a
   `rust-toolchain.toml` that floats and any workflow that installs a toolchain of its own - a
