@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The copies beside a consumer no longer collide.** `lnk_copy_beside()` gives every consumer
+  its own copy of the library, ordered after that consumer and after cargo - and consumers that
+  share an output directory, a repository's test executables typically, therefore had two of
+  those writing the very same destination file with nothing ordering them against each other. A
+  build system worth having runs them at the same moment, and one of them fails: `Error copying
+  file (if different)` on the flagship's verify leg (2026-08-27), where three test executables
+  share `src/tests/Release`. The copies are now chained - each waits for the one before it - so
+  only ever one is in flight; each is a file compare and costs nothing. The guide's account of
+  the face is corrected with it: the face probes no compiler and nothing here compiles the
+  headers - `cargo test` parses them.
 - **The guides.** The owner's ask (2026-08-27): every repository of the organisation gets a
   development-environment guide a contributor can follow without struggling. Here:
   `docs/DEV_ENV_SETUP.md` - the short version, the pins (Rust 1.95.0 through `rust-toolchain.toml`,
