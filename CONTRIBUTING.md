@@ -94,7 +94,8 @@ When submitting:
 
 ### Prerequisites
 
-- Rust stable toolchain, 1.85 or later (edition 2024), via [rustup](https://rustup.rs/)
+- [rustup](https://rustup.rs/) - Rust 1.95.0 is pinned by `rust-toolchain.toml` and installed on first use
+- A linker: the Visual Studio C++ workload (or Build Tools) on Windows, `build-essential` on Linux
 - Nothing else — the crate uses the standard library only, with zero third-party crates
 
 ### Setup
@@ -107,7 +108,11 @@ cd link
 
 cargo build
 cargo test
+python tools/check_protocol_version.py check
 ```
+
+The complete guide - the pins, what CI runs and how to run every leg at home, the rules for
+changing the wire and its companions - is [docs/DEV_ENV_SETUP.md](docs/DEV_ENV_SETUP.md).
 
 ---
 

@@ -36,12 +36,19 @@ design authority: design changes land there before code lands here.
 
 ## Building
 
+> **New here?** [docs/DEV_ENV_SETUP.md](docs/DEV_ENV_SETUP.md) builds and tests the wire from nothing
+> on Windows or Linux, exactly as CI does, and says how a change to the wire reaches the three
+> repositories that load it. The flagship's
+> [RUNNING_THE_GRID.md](https://github.com/ai-quokka-wannabe/tron-grid-lite/blob/main/docs/RUNNING_THE_GRID.md)
+> stands the whole ecosystem up.
+
 ```bash
 cargo build --release
 cargo test
 ```
 
-Rust stable 1.85 or later (edition 2024), via [rustup](https://rustup.rs/). Nothing else.
+Rust 1.95.0, pinned by `rust-toolchain.toml` and installed by [rustup](https://rustup.rs/) on first
+use. Nothing else.
 
 ## Consuming From CMake
 

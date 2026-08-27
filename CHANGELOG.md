@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The guides.** The owner's ask (2026-08-27): every repository of the organisation gets a
+  development-environment guide a contributor can follow without struggling. Here:
+  `docs/DEV_ENV_SETUP.md` - the short version, the pins (Rust 1.95.0 through `rust-toolchain.toml`,
+  a linker, nothing else), Windows and Linux step by step, what CI runs and how to run every leg at
+  home, the rules for changing the wire (bump, re-record the fingerprint, mirror, refuse both ways,
+  open the companions), troubleshooting. CONTRIBUTING and the README no longer say 1.85 and point
+  at the guide and at the flagship's `RUNNING_THE_GRID.md`.
 - **A refusal, by name, on the wire: protocol v8.** Until now a host whose `REZ` the world
   refused learned of it only by never hearing its body relayed - the world refused by name in
   its own log and said nothing to the one it refused. `REFUSED` (type 12, sixteen bytes) is
