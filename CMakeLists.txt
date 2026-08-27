@@ -56,4 +56,19 @@ function(lnk_copy_beside consumer)
         VERBATIM
     )
     add_dependencies(lnk_copy_beside_${consumer} link_library ${consumer})
+
+    # Consumers that share an output directory - a repository's test executables, typically -
+    # otherwise get one copy each writing the very same destination file, ordered after nothing
+    # but their own consumer, and a build system worth having runs them at the same moment: two
+    # copies of one file into one directory, and one of them fails. It did, once, on the
+    # flagship's verify leg (2026-08-27): three test executables share src/tests/Release, and the
+    # copy beside the first collided with the copy beside another. So the copies are chained -
+    # each waits for the one before it - and only ever one is in flight. Each is a file compare
+    # that costs nothing, and the chain is a global property because the consumers are spread
+    # across directories.
+    get_property(lnk_previous_copy GLOBAL PROPERTY LNK_LAST_COPY_TARGET)
+    if(lnk_previous_copy)
+        add_dependencies(lnk_copy_beside_${consumer} ${lnk_previous_copy})
+    endif()
+    set_property(GLOBAL PROPERTY LNK_LAST_COPY_TARGET lnk_copy_beside_${consumer})
 endfunction()

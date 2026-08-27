@@ -30,7 +30,6 @@ version.
 | Git | any recent | <https://git-scm.com/downloads> |
 | Python | 3.10 or newer, for `tools/check_protocol_version.py` | <https://www.python.org/downloads/> |
 | CMake + Ninja | 3.25+ and any Ninja, **only** to exercise the CMake face consumers use | <https://cmake.org/download/> |
-| A C and a C++ compiler | any, **only** for the header tests the CMake face runs (the headers must compile as C17 and C++20 with every assert) | as above |
 | Node.js | 20 or newer, only for the markdown linter (`npm ci`) | <https://nodejs.org/> |
 
 **There are no crates.** Link is `std` only: the protocol, the codec, the transport, the C ABI
@@ -83,7 +82,7 @@ On both platforms, on every pull request and on `main`:
 | Docs | `cargo doc --locked --no-deps --document-private-items` | Every doc comment, warnings as errors |
 | Tests | `cargo test --locked` | The codec both ways, the transport over real loopback sockets, the C ABI through its own vtable, the Disk written and replayed |
 | The fingerprint | `python tools/check_protocol_version.py check` | The recorded fingerprint of `lnk_protocol.h` still describes the header - so a change to the wire cannot land without its version bump |
-| The CMake face | `cmake --workflow --preset default` | What a consumer sees: cargo driven by CMake, the headers compiled as C17 and as C++20 with every static assert, the library copied beside a test executable |
+| The CMake face | `cmake --workflow --preset default` | What a consumer sees: cargo driven by CMake, on both platforms, so the face cannot rot. It is `LANGUAGES NONE` and probes no compiler; the copy-beside rule it offers is exercised by the consumers that call it |
 | Toolchain pin | `.github/scripts/check-toolchain-pin.sh` | One pin, no workflow installing its own |
 | Markdown | `npm ci && npm run lint:md` | The pinned markdownlint-cli2 |
 | Links | lychee | Every link in the tree |
@@ -109,7 +108,8 @@ its own:
    the content did. CI's `check` compares.
 3. **Mirror it in Rust, and pin it.** Every struct is `#[repr(C)]` with a `const` size assert in
    `src/protocol.rs`, and the header carries `LNK_STATIC_ASSERT`s for the same sizes and for the
-   absence of padding; `cargo test` compiles the headers and parses them for the twin constants.
+   absence of padding; `cargo test` parses the headers themselves for the twin constants, so the
+   two cannot drift apart unnoticed.
 4. **Refuse by name, both ways.** The codec refuses on decode everything it refuses on encode,
    and a refused encode writes nothing; an unknown reason, kind, role or type is a named error,
    never a shrug. Add the test to the roundtrip list and to the refusals.
