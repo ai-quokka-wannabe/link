@@ -20,7 +20,7 @@ compile_error!("The Link protocol is little-endian on the wire; a big-endian hos
 /// `LNK_PROTOCOL_VERSION`: bumped whenever any declaration changes meaning or layout. The
 /// handshake carries the header's fingerprint rather than this number; the number exists for
 /// the human-readable refusal.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// `LNK_DEFAULT_PORT`: where Master Control listens when nobody names another port. A default
 /// and only a default. The number is the owner's: 30702, from JA-307020 — Tron's program
@@ -78,6 +78,7 @@ pub enum MessageType {
     Pong = 9,
     Bye = 10,
     Proprioception = 11,
+    Refused = 12,
 }
 
 /// What a client is, stated in HELLO. Zero is invalid. A spectator never sends ACTIONS, and the
@@ -382,6 +383,36 @@ pub struct Derez {
     pub reserved0: [u8; 4],
 }
 
+/// Why a REZ was not honoured, on the wire. Zero is invalid, deliberately, and the codec
+/// refuses anything it does not know: a refusal is named or it is not sent.
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RefusalReason {
+    /// Another host wears this identity; the REZ changed nothing.
+    Owned = 1,
+    /// The world could not carry one more row.
+    Full = 2,
+    /// Every spot of the spawn lattice is taken, and a body is never stood on another.
+    Crowded = 3,
+    /// A declared bound, or the mesh, is outside what the world allows.
+    Bounds = 4,
+}
+
+/// REFUSED, server to the one host whose REZ it did not honour - a letter, not a broadcast:
+/// the tick it was judged at, the creature the REZ named, and the reason by name. Sixteen
+/// bytes. Until v8 a host learned of a refusal only by never hearing its body relayed; a
+/// world that refuses by name in its own log now says so to the one it refused.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Refused {
+    pub tick: u64,
+    pub creature_id: u32,
+    /// A [`RefusalReason`] as a raw byte; the codec refuses anything unknown.
+    pub reason: u8,
+    /// Always zero.
+    pub reserved0: [u8; 3],
+}
+
 /// PING, either direction. The nonce comes back verbatim in a PONG, so each end measures its
 /// own round trip without trusting the other's clock.
 #[repr(C)]
@@ -415,6 +446,7 @@ pub const fn exact_payload_bytes(message: MessageType) -> Option<usize> {
         MessageType::Pong => Some(size_of::<Pong>()),
         MessageType::Bye => Some(0),
         MessageType::Proprioception => None,
+        MessageType::Refused => Some(size_of::<Refused>()),
     }
 }
 
@@ -439,6 +471,7 @@ const _: () = assert!(size_of::<TickStateHeader>() == 8 + 4 + 4 && size_of::<Tic
 const _: () = assert!(size_of::<Actions>() == 8 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 4 && size_of::<Actions>() == 40);
 const _: () = assert!(size_of::<Event>() == 8 + 12 + 4 + 4 + 1 + 3 && size_of::<Event>() == 32);
 const _: () = assert!(size_of::<Derez>() == 8 + 4 + 4 && size_of::<Derez>() == 16);
+const _: () = assert!(size_of::<Refused>() == 8 + 4 + 1 + 3 && size_of::<Refused>() == 16);
 const _: () = assert!(size_of::<Contact>() == 52);
 const _: () = assert!(size_of::<Proprioception>() == 8 + 4 + 1 + 3 + 12 + 4 && size_of::<Proprioception>() == 32);
 const _: () = assert!(size_of::<Proprioception>() + CONTACTS_MAX as usize * size_of::<Contact>() <= FRAME_PAYLOAD_LIMIT);
@@ -461,6 +494,7 @@ mod tests {
         assert_eq!(exact_payload_bytes(MessageType::Ping), Some(8));
         assert_eq!(exact_payload_bytes(MessageType::Pong), Some(8));
         assert_eq!(exact_payload_bytes(MessageType::Bye), Some(0));
+        assert_eq!(exact_payload_bytes(MessageType::Refused), Some(16));
     }
 
     #[test]
@@ -474,6 +508,7 @@ mod tests {
             MessageType::Ping,
             MessageType::Pong,
             MessageType::Bye,
+            MessageType::Refused,
         ] {
             let bytes = exact_payload_bytes(message).expect("fixed messages declare a size");
             assert!(bytes <= FRAME_PAYLOAD_LIMIT, "{message:?} cannot fit one frame");
@@ -501,10 +536,13 @@ mod tests {
         assert_eq!(MAGIC, [0x4C, 0x4E, 0x4B, 0x31]);
         assert_eq!(MessageType::Hello as u8, 1);
         assert_eq!(MessageType::Bye as u8, 10);
+        assert_eq!(MessageType::Refused as u8, 12);
+        assert_eq!(RefusalReason::Owned as u8, 1);
+        assert_eq!(RefusalReason::Bounds as u8, 4);
         assert_eq!(Role::Spectator as u8, 1);
         assert_eq!(Role::CreatureHost as u8, 2);
         assert_eq!(EventKind::Vocalisation as u8, 1);
-        assert_eq!(PROTOCOL_VERSION, 7);
+        assert_eq!(PROTOCOL_VERSION, 8);
         assert_eq!(DEFAULT_PORT, 30_702);
     }
 
