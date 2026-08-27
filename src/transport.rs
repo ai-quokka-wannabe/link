@@ -284,6 +284,7 @@ impl Connection {
                         Message::TickState { .. } => Some("TICK_STATE"),
                         Message::Event(_) => Some("EVENT"),
                         Message::Proprioception { .. } => Some("PROPRIOCEPTION"),
+                        Message::Refused(_) => Some("REFUSED"),
                         _ => None,
                     }
                 } else {
@@ -858,6 +859,52 @@ mod tests {
         assert!(
             matches!(verdict, Err(TransportError::ActionsFromSpectator)),
             "a spectator's REZ must end the connection like its ACTIONS would, got {verdict:?}"
+        );
+        drop(client.join().expect("client thread"));
+    }
+
+    #[test]
+    fn a_refusal_flows_one_way_only() {
+        // The world's word on a REZ is the world's to say: a client that says it is hung up on.
+        let (listener, address) = loopback();
+        let refusal = Message::Refused(crate::protocol::Refused {
+            tick: 1,
+            creature_id: 1,
+            reason: crate::protocol::RefusalReason::Owned as u8,
+            reserved0: [0; 3],
+        });
+        let client_refusal = refusal.clone();
+        let client = std::thread::spawn(move || {
+            let (mut connection, _) = connect(address, &local_hello(Role::CreatureHost, WORLD), PATIENCE).expect("handshake");
+            connection.queue(&client_refusal).expect("the codec itself does not know ends");
+            loop {
+                match connection.flush() {
+                    Ok(true) | Err(_) => break,
+                    Ok(false) => {}
+                }
+            }
+            connection
+        });
+
+        let (stream, _) = listener.accept().expect("accept");
+        let (mut server_side, _) = accept(stream, PATIENCE, WORLD).expect("handshake");
+        server_side.queue(&welcome()).expect("queue welcome");
+        server_side.queue(&refusal).expect("the server may refuse");
+        while !server_side.flush().expect("flush") {}
+
+        let deadline = std::time::Instant::now() + PATIENCE;
+        let verdict = loop {
+            match server_side.poll() {
+                Ok(None) => {
+                    assert!(std::time::Instant::now() < deadline, "the violation never arrived");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                other => break other,
+            }
+        };
+        assert!(
+            matches!(verdict, Err(TransportError::WrongWay("REFUSED"))),
+            "a refusal arriving at the server ends the connection, got {verdict:?}"
         );
         drop(client.join().expect("client thread"));
     }

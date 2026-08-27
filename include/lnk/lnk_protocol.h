@@ -49,7 +49,7 @@ extern "C"
     carries the header's fingerprint rather than this number, so two ends disagreeing about the
     bytes are refused even when they agree about the number; the number exists for the
     human-readable refusal. */
-#define LNK_PROTOCOL_VERSION 7u
+#define LNK_PROTOCOL_VERSION 8u
 
 /*! The port Master Control listens on when nobody names another - a default and only a
     default: the client's positional argument carries any host and port, and Master Control
@@ -120,6 +120,7 @@ extern "C"
 #define LNK_MSG_PONG 9u
 #define LNK_MSG_BYE 10u
 #define LNK_MSG_PROPRIOCEPTION 11u
+#define LNK_MSG_REFUSED 12u
 
 /*! What a client is, stated in HELLO. Zero is invalid. A spectator never sends ACTIONS or REZ,
     and the refusal is enforced inside this library on both ends - the sending half refuses to
@@ -394,6 +395,24 @@ typedef struct LnkDerez {
     uint8_t reserved0[4];   /*!< Always zero. Named so the asserts can count it. */
 } LnkDerez;
 
+/*! Why a REZ was not honoured. Zero is invalid, deliberately, and the codec refuses anything it
+    does not know: a refusal is named or it is not sent. */
+#define LNK_REFUSED_OWNED 1u   /*!< Another host wears this identity; the REZ changed nothing. */
+#define LNK_REFUSED_FULL 2u    /*!< The world could not carry one more row. */
+#define LNK_REFUSED_CROWDED 3u /*!< Every spot of the spawn lattice is taken; a body is never stood on another. */
+#define LNK_REFUSED_BOUNDS 4u  /*!< A declared bound, or the mesh, is outside what the world allows. */
+
+/*! REFUSED, server to the one host whose REZ it did not honour - a letter, not a broadcast:
+    the tick it was judged at, the creature the REZ named, and the reason by name. Until v8 a
+    host learned of a refusal only by never hearing its body relayed; a world that refuses by
+    name in its own log now says so to the one it refused. */
+typedef struct LnkRefused {
+    uint64_t tick;
+    uint32_t creature_id;
+    uint8_t reason;        /*!< One of LNK_REFUSED_*. Zero is invalid. */
+    uint8_t reserved0[3];  /*!< Always zero. Named so the asserts can count it. */
+} LnkRefused;
+
 /*! PING, either direction. The nonce comes back verbatim in a PONG, so each end measures its
     own round trip without trusting the other's clock. */
 typedef struct LnkPing {
@@ -480,6 +499,10 @@ LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkEvent, tick) + LNK_MEMBER_BYTES(LnkEvent, 
                   "LnkEvent has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkDerez, tick) + LNK_MEMBER_BYTES(LnkDerez, creature_id) + LNK_MEMBER_BYTES(LnkDerez, reserved0) == sizeof(LnkDerez),
                   "LnkDerez has padding: a member changed width.");
+LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkRefused, tick) + LNK_MEMBER_BYTES(LnkRefused, creature_id) + LNK_MEMBER_BYTES(LnkRefused, reason)
+                          + LNK_MEMBER_BYTES(LnkRefused, reserved0)
+                      == sizeof(LnkRefused),
+                  "LnkRefused has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkPing, nonce) == sizeof(LnkPing), "LnkPing has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkPong, nonce) == sizeof(LnkPong), "LnkPong has padding: a member changed width.");
 
@@ -496,6 +519,7 @@ LNK_STATIC_ASSERT(sizeof(LnkActions) == 40u,
                   "LnkActions must be 40 bytes: tick, id, TglActions' twelve, the previous tick's twelve resent, and a counted reserved word.");
 LNK_STATIC_ASSERT(sizeof(LnkEvent) == 32u, "LnkEvent must be 32 bytes: tick, place, strength, cause, kind.");
 LNK_STATIC_ASSERT(sizeof(LnkDerez) == 16u, "LnkDerez must be 16 bytes: tick, id, reserved.");
+LNK_STATIC_ASSERT(sizeof(LnkRefused) == 16u, "LnkRefused must be 16 bytes: tick, id, reason, reserved.");
 LNK_STATIC_ASSERT(sizeof(LnkContact) == 52u, "LnkContact must be 52 bytes: position, impulse, normal, depth, slip.");
 LNK_STATIC_ASSERT(sizeof(LnkProprioception) == 32u, "LnkProprioception must be 32 bytes: tick, id, grounded, reserved, force, count.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkContact, position) + LNK_MEMBER_BYTES(LnkContact, impulse) + LNK_MEMBER_BYTES(LnkContact, normal)

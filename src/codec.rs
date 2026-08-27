@@ -13,8 +13,8 @@
 
 use crate::protocol::{
     Actions, CONTACTS_MAX, Contact, CreatureState, Derez, Event, EventKind, FRAME_HEADER_BYTES, Hello, MessageType, Ping, Pong, Proprioception, REZ_MAX_MATERIALS,
-    REZ_MAX_TRIANGLES, REZ_MAX_VERTICES, Rez, RezMaterial, RezTriangle, RezVertex, Role, SEGMENTS_MAX, SegmentPose, TICK_STATE_MAX_CREATURES, TRAILING_SEGMENTS_MAX,
-    TickStateHeader, Welcome,
+    REZ_MAX_TRIANGLES, REZ_MAX_VERTICES, RefusalReason, Refused, Rez, RezMaterial, RezTriangle, RezVertex, Role, SEGMENTS_MAX, SegmentPose, TICK_STATE_MAX_CREATURES,
+    TRAILING_SEGMENTS_MAX, TickStateHeader, Welcome,
 };
 
 /// A decoded message, owning its payload. TICK_STATE's rows live in a `Vec` sized only after
@@ -37,6 +37,7 @@ pub enum Message {
     Actions(Actions),
     Event(Event),
     Derez(Derez),
+    Refused(Refused),
     /// The owner's letter: the body's feel this tick, contacts copied out.
     Proprioception {
         header: Proprioception,
@@ -91,6 +92,8 @@ pub enum DecodeError {
     InvalidRole(u8),
     /// An event kind byte no v1 end emits.
     InvalidEventKind(u8),
+    /// A REFUSED with a reason nobody named.
+    InvalidRefusalReason(u8),
     /// Reserved bytes must be zero. A nonzero one is either corruption or a future version
     /// talking to a past one, and both deserve refusal rather than a shrug.
     ReservedNotZero,
@@ -149,6 +152,8 @@ pub enum EncodeError {
     },
     InvalidRole(u8),
     InvalidEventKind(u8),
+    /// A REFUSED with a reason nobody named.
+    InvalidRefusalReason(u8),
     ReservedNotZero,
     /// The REZ refusals, sending side — encode refuses exactly what decode refuses.
     RezCountOverCap {
@@ -261,6 +266,7 @@ pub const fn payload_rule(type_byte: u8) -> Result<PayloadRule, DecodeError> {
         t if t == MessageType::Pong as u8 => Ok(PayloadRule::Exact(size_of::<Pong>())),
         t if t == MessageType::Bye as u8 => Ok(PayloadRule::Exact(0)),
         t if t == MessageType::Proprioception as u8 => Ok(PayloadRule::Proprioception),
+        t if t == MessageType::Refused as u8 => Ok(PayloadRule::Exact(size_of::<Refused>())),
         other => Err(DecodeError::UnknownOrReservedType(other)),
     }
 }
@@ -361,6 +367,21 @@ pub fn decode(type_byte: u8, payload: &[u8]) -> Result<Message, DecodeError> {
             t if t == MessageType::Ping as u8 => Ok(Message::Ping(Ping { nonce: read_u64(payload, 0) })),
             t if t == MessageType::Pong as u8 => Ok(Message::Pong(Pong { nonce: read_u64(payload, 0) })),
             t if t == MessageType::Bye as u8 => Ok(Message::Bye),
+            t if t == MessageType::Refused as u8 => {
+                let reason = payload[12];
+                if !is_refusal_reason(reason) {
+                    return Err(DecodeError::InvalidRefusalReason(reason));
+                }
+                if payload[13..16] != [0u8; 3] {
+                    return Err(DecodeError::ReservedNotZero);
+                }
+                Ok(Message::Refused(Refused {
+                    tick: read_u64(payload, 0),
+                    creature_id: read_u32(payload, 8),
+                    reason,
+                    reserved0: [0; 3],
+                }))
+            }
             other => Err(DecodeError::UnknownOrReservedType(other)),
         },
     }
@@ -481,6 +502,11 @@ fn decode_rez(payload: &[u8]) -> Result<Message, DecodeError> {
         triangles,
         materials,
     })
+}
+
+/// The reasons a REFUSED may name - the enum's values, and nothing else.
+const fn is_refusal_reason(reason: u8) -> bool {
+    reason == RefusalReason::Owned as u8 || reason == RefusalReason::Full as u8 || reason == RefusalReason::Crowded as u8 || reason == RefusalReason::Bounds as u8
 }
 
 fn decode_event(payload: &[u8]) -> Result<Message, DecodeError> {
@@ -882,6 +908,19 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             out.extend_from_slice(&derez.creature_id.to_le_bytes());
             out.extend_from_slice(&derez.reserved0);
         }
+        Message::Refused(refused) => {
+            if !is_refusal_reason(refused.reason) {
+                return Err(EncodeError::InvalidRefusalReason(refused.reason));
+            }
+            if refused.reserved0 != [0; 3] {
+                return Err(EncodeError::ReservedNotZero);
+            }
+            frame_header(out, MessageType::Refused, size_of::<Refused>());
+            out.extend_from_slice(&refused.tick.to_le_bytes());
+            out.extend_from_slice(&refused.creature_id.to_le_bytes());
+            out.push(refused.reason);
+            out.extend_from_slice(&refused.reserved0);
+        }
         Message::Ping(ping) => {
             frame_header(out, MessageType::Ping, size_of::<Ping>());
             out.extend_from_slice(&ping.nonce.to_le_bytes());
@@ -1103,7 +1142,48 @@ mod tests {
             Message::Ping(Ping { nonce: 0xDEAD_BEEF }),
             Message::Pong(Pong { nonce: 0xDEAD_BEEF }),
             Message::Bye,
+            Message::Refused(Refused {
+                tick: 45,
+                creature_id: 3,
+                reason: RefusalReason::Crowded as u8,
+                reserved0: [0; 3],
+            }),
         ]
+    }
+
+    #[test]
+    fn a_refusal_is_named_or_it_is_refused_both_ways() {
+        // Every named reason rides; zero and the first unnamed value are refused by name on
+        // both sides, and a refused encode writes nothing.
+        for reason in [RefusalReason::Owned, RefusalReason::Full, RefusalReason::Crowded, RefusalReason::Bounds] {
+            let message = Message::Refused(Refused {
+                tick: 9,
+                creature_id: 512,
+                reason: reason as u8,
+                reserved0: [0; 3],
+            });
+            let frame = frame_of(&message);
+            assert_eq!(frame.len(), FRAME_HEADER_BYTES + 16);
+            assert_eq!(decode(frame[2], &frame[FRAME_HEADER_BYTES..]), Ok(message));
+        }
+        for unnamed in [0u8, 5, 255] {
+            let mut out = Vec::new();
+            let refused = Refused {
+                tick: 9,
+                creature_id: 512,
+                reason: unnamed,
+                reserved0: [0; 3],
+            };
+            assert_eq!(encode(&Message::Refused(refused), &mut out), Err(EncodeError::InvalidRefusalReason(unnamed)));
+            assert!(out.is_empty(), "a refused encode writes nothing");
+            let mut payload = [0u8; 16];
+            payload[12] = unnamed;
+            assert_eq!(decode(MessageType::Refused as u8, &payload), Err(DecodeError::InvalidRefusalReason(unnamed)));
+        }
+        let mut payload = [0u8; 16];
+        payload[12] = RefusalReason::Owned as u8;
+        payload[15] = 1;
+        assert_eq!(decode(MessageType::Refused as u8, &payload), Err(DecodeError::ReservedNotZero));
     }
 
     fn frame_of(message: &Message) -> Vec<u8> {
@@ -1145,7 +1225,8 @@ mod tests {
 
     #[test]
     fn unknown_and_reserved_types_are_refused_before_any_copy() {
-        for type_byte in [0u8, 12, 200, 255] {
+        // Twelve became REFUSED in v8; thirteen is the first number nobody has taken.
+        for type_byte in [0u8, 13, 200, 255] {
             assert_eq!(payload_rule(type_byte), Err(DecodeError::UnknownOrReservedType(type_byte)));
         }
     }

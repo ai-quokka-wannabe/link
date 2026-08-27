@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A refusal, by name, on the wire: protocol v8.** Until now a host whose `REZ` the world
+  refused learned of it only by never hearing its body relayed - the world refused by name in
+  its own log and said nothing to the one it refused. `REFUSED` (type 12, sixteen bytes) is
+  the server's letter to that one host: the tick it was judged at, the creature the `REZ`
+  named, and the reason by name - `LNK_REFUSED_OWNED` (another host wears the identity),
+  `FULL` (no room for one more row), `CROWDED` (no spot on the spawn lattice), `BOUNDS` (a
+  bound or the mesh outside what the world allows). Zero and anything unnamed are refused by
+  the codec both ways, and a refused encode writes nothing; a client that sends one is hung
+  up on as the wrong way, like a letter. The C ABI gains `send_refused` on the vtable and
+  `refused` in the message view, so `LNK_CLIENT_ABI_VERSION` is 8. Companions: master-control
+  sends it where its roster refuses; the flagship's host says it out loud and stops waiting.
 - **The chain, on the wire: protocol v7.** The owner's ruling (2026-08-26): a worm is a chain
   of icosahedra joined spike to spike, and it undulates. The wire's part: a `REZ` names how
   many segments its creature has (`segment_count`, the head counted, one to

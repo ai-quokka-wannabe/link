@@ -42,7 +42,7 @@ extern "C"
 /*! Bumped whenever this table or its rules change. lnkGetClientVTable refuses any other
     number, so a consumer built against a stale copy of this header is told at load time
     rather than corrupted at call time. */
-#define LNK_CLIENT_ABI_VERSION 7u
+#define LNK_CLIENT_ABI_VERSION 8u
 
 /*
     Statuses. Zero is success and only success; everything else names its failure. No function
@@ -121,6 +121,7 @@ typedef struct LnkMessageView {
         LnkTickStateView tick_state;
         LnkEvent event;
         LnkDerez derez;
+        LnkRefused refused; /*!< The world's word on a REZ it did not honour, to the one host that sent it. */
         LnkPing ping;
         LnkPong pong;
         LnkHello hello;     /*!< Only on a server-held connection; at a client it is the wrong way, and refused. */
@@ -248,6 +249,12 @@ typedef struct LnkClientVTable {
 
     /*! Stage a DEREZ - the creature leaves the world at this tick. */
     LnkStatus (*send_derez)(LnkClient* connection, const LnkDerez* derez);
+
+    /*! Stage a REFUSED on a server-held connection - the world's word to the one host whose
+        REZ it did not honour, the reason one of LNK_REFUSED_*. A client never sends it: the
+        wire hangs up on one that does. Refused with LNK_BAD_ARGUMENT on a null pointer; a
+        reason nobody named is refused by the codec, and nothing is written. */
+    LnkStatus (*send_refused)(LnkClient* connection, const LnkRefused* refused);
 
     /*! Stage a PROPRIOCEPTION on a server-held connection - the owner's letter: the header,
         then header->contact_count rows read from `contacts`. The count is validated against

@@ -17,7 +17,7 @@ use std::time::Duration;
 use crate::codec::Message;
 use crate::protocol::{
     Actions, CONTACTS_MAX, Contact, CreatureState, Derez, Event, Hello, MessageType, PROTOCOL_VERSION, Ping, Pong, Proprioception, REZ_MAX_MATERIALS, REZ_MAX_TRIANGLES,
-    REZ_MAX_VERTICES, Rez, RezMaterial, RezTriangle, RezVertex, Role, TickStateHeader, Welcome, WorldDefinition, world_fingerprint,
+    REZ_MAX_VERTICES, Refused, Rez, RezMaterial, RezTriangle, RezVertex, Role, TickStateHeader, Welcome, WorldDefinition, world_fingerprint,
 };
 use crate::recording::{Recorder, Replayer};
 use crate::transport::{Connection, Listener, TransportError, connect, listen, local_hello, recorded_fingerprint};
@@ -83,7 +83,7 @@ impl End {
 
 /// `LNK_CLIENT_ABI_VERSION`: bumped whenever the vtable or its rules change. The twin lives in
 /// `lnk_client.h`, and a test holds the two together.
-pub const LNK_CLIENT_ABI_VERSION: u32 = 7;
+pub const LNK_CLIENT_ABI_VERSION: u32 = 8;
 
 pub type LnkStatus = i32;
 
@@ -166,6 +166,7 @@ pub union MessageViewPayload {
     pub tick_state: TickStateView,
     pub event: Event,
     pub derez: Derez,
+    pub refused: Refused,
     pub ping: Ping,
     pub pong: Pong,
     pub hello: Hello,
@@ -223,6 +224,7 @@ pub struct LnkClientVTable {
     pub send_tick_state: extern "C" fn(connection: *mut LnkClient, header: *const TickStateHeader, states: *const CreatureState) -> LnkStatus,
     pub send_event: extern "C" fn(connection: *mut LnkClient, event: *const Event) -> LnkStatus,
     pub send_derez: extern "C" fn(connection: *mut LnkClient, derez: *const Derez) -> LnkStatus,
+    pub send_refused: extern "C" fn(connection: *mut LnkClient, refused: *const Refused) -> LnkStatus,
     pub send_proprioception: extern "C" fn(connection: *mut LnkClient, proprioception: *const Proprioception, contacts: *const Contact) -> LnkStatus,
     pub close_server: extern "C" fn(server: *mut LnkServer),
     pub record_open: extern "C" fn(
@@ -266,6 +268,7 @@ static VTABLE: LnkClientVTable = LnkClientVTable {
     send_tick_state: send_tick_state_impl,
     send_event: send_event_impl,
     send_derez: send_derez_impl,
+    send_refused: send_refused_impl,
     send_proprioception: send_proprioception_impl,
     close_server: close_server_impl,
     record_open: record_open_impl,
@@ -509,6 +512,7 @@ extern "C" fn poll_impl(client: *mut LnkClient, out_message: *mut MessageView) -
             }
             Message::Event(event) => (MessageType::Event, MessageViewPayload { event }),
             Message::Derez(derez) => (MessageType::Derez, MessageViewPayload { derez }),
+            Message::Refused(refused) => (MessageType::Refused, MessageViewPayload { refused }),
             Message::Ping(ping) => (MessageType::Ping, MessageViewPayload { ping }),
             Message::Pong(pong) => (MessageType::Pong, MessageViewPayload { pong }),
             Message::Bye => (MessageType::Bye, MessageViewPayload { ping: Ping { nonce: 0 } }),
@@ -798,6 +802,17 @@ extern "C" fn send_derez_impl(connection: *mut LnkClient, derez: *const Derez) -
         // SAFETY: non-null was just checked; Derez is plain old data, read by copy.
         let derez = unsafe { *derez };
         queue_on(connection, &Message::Derez(derez))
+    })
+}
+
+extern "C" fn send_refused_impl(connection: *mut LnkClient, refused: *const Refused) -> LnkStatus {
+    guarded(LNK_PANIC, || {
+        if refused.is_null() {
+            return LNK_BAD_ARGUMENT;
+        }
+        // SAFETY: non-null was just checked; Refused is plain old data, read by copy.
+        let refused = unsafe { *refused };
+        queue_on(connection, &Message::Refused(refused))
     })
 }
 
@@ -1376,7 +1391,7 @@ mod tests {
             let mut view = unsafe { std::mem::zeroed::<MessageView>() };
             let mut seen = Vec::new();
             let deadline = std::time::Instant::now() + PATIENCE;
-            while seen.len() < 3 {
+            while seen.len() < 4 {
                 match (table.poll)(client, &raw mut view) {
                     LNK_NOTHING_YET => {
                         assert!(std::time::Instant::now() < deadline, "the world tick never arrived");
@@ -1397,8 +1412,13 @@ mod tests {
                     other => panic!("poll answered {other}"),
                 }
             }
-            let expected = vec![MessageType::TickState as u8, MessageType::Event as u8, MessageType::Derez as u8];
-            assert_eq!(seen, expected, "one coalesced write, three frames, in order");
+            let expected = vec![
+                MessageType::TickState as u8,
+                MessageType::Event as u8,
+                MessageType::Derez as u8,
+                MessageType::Refused as u8,
+            ];
+            assert_eq!(seen, expected, "one coalesced write, four frames, in order");
             (table.close)(client);
         });
 
@@ -1466,6 +1486,14 @@ mod tests {
             reserved0: [0; 4],
         };
         assert_eq!((table.send_derez)(connection, &raw const derez), LNK_OK);
+        let refused = Refused {
+            tick: 901,
+            creature_id: 9,
+            reason: crate::protocol::RefusalReason::Owned as u8,
+            reserved0: [0; 3],
+        };
+        assert_eq!((table.send_refused)(connection, &raw const refused), LNK_OK);
+        assert_eq!((table.send_refused)(connection, std::ptr::null()), LNK_BAD_ARGUMENT);
         let mut everything_left = 0u8;
         assert_eq!((table.flush)(connection, &raw mut everything_left), LNK_OK);
         assert_eq!(everything_left, 1);
