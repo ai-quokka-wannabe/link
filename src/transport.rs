@@ -640,6 +640,8 @@ mod tests {
             previous_forward_speed: 0.0,
             previous_turn_rate: 0.0,
             previous_vocalisation: 0.0,
+            joint_targets: [0.0; 7],
+            previous_joint_targets: [0.0; 7],
             reserved0: [0; 4],
         })
     }
@@ -819,6 +821,8 @@ mod tests {
                 material_count: 0,
                 segment_count: 1,
                 segment_spacing: 0.0,
+                max_joint_angle: 0.0,
+                max_joint_torque: 0.0,
             },
             vertices: Vec::new(),
             triangles: Vec::new(),
@@ -992,6 +996,8 @@ mod tests {
             previous_forward_speed: 0.0,
             previous_turn_rate: 0.0,
             previous_vocalisation: 0.0,
+            joint_targets: [0.0; 7],
+            previous_joint_targets: [0.0; 7],
             reserved0: [0; 4],
         });
         let hello = Message::Hello(local_hello(Role::Spectator, WORLD));

@@ -20,7 +20,7 @@ compile_error!("The Link protocol is little-endian on the wire; a big-endian hos
 /// `LNK_PROTOCOL_VERSION`: bumped whenever any declaration changes meaning or layout. The
 /// handshake carries the header's fingerprint rather than this number; the number exists for
 /// the human-readable refusal.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// `LNK_DEFAULT_PORT`: where Master Control listens when nobody names another port. A default
 /// and only a default. The number is the owner's: 30702, from JA-307020 — Tron's program
@@ -202,6 +202,12 @@ pub struct Rez {
     /// Metres between consecutive segments' origins along the head's path; zero for a chain of
     /// one, strictly positive and finite otherwise - refused by name either way.
     pub segment_spacing: f32,
+    /// The most a servo is asked to hold, radians, the bound the server clamps every joint
+    /// target to; zero means the body has no servos - a bound of zero is no such actuator,
+    /// the Program ABI's own rule. Finite and non-negative or the REZ is refused.
+    pub max_joint_angle: f32,
+    /// The most torque a servo can hold with, newton-metres; zero with a zero angle bound.
+    pub max_joint_torque: f32,
 }
 
 /// One vertex position in body frame, metres.
@@ -317,6 +323,12 @@ pub struct Actions {
     pub previous_turn_rate: f32,
     /// See `previous_forward_speed`.
     pub previous_vocalisation: f32,
+    /// The angle each servo is asked to hold this tick, radians, joint `k` between segments
+    /// `k` and `k + 1`, positive bending to the head's left; `segment_count - 1` meaningful,
+    /// the rest zero. Clamped server-side to the body's `max_joint_angle`. The muscle.
+    pub joint_targets: [f32; SEGMENTS_MAX as usize - 1],
+    /// The tick-1 targets, resent whole. Zeroes when none exist.
+    pub previous_joint_targets: [f32; SEGMENTS_MAX as usize - 1],
     /// Always zero. Counted rather than left as invisible alignment padding.
     pub reserved0: [u8; 4],
 }
@@ -456,7 +468,7 @@ pub const fn exact_payload_bytes(message: MessageType) -> Option<usize> {
 const _: () = assert!(size_of::<Hello>() == 4 + 32 + 1 + 3 + 8 && size_of::<Hello>() == 48);
 const _: () = assert!(size_of::<Welcome>() == 8 + 4 + 4 + 8 && size_of::<Welcome>() == 24);
 const _: () = assert!(size_of::<WorldDefinition>() == 10 * 4 && size_of::<WorldDefinition>() == 40);
-const _: () = assert!(size_of::<Rez>() == 10 * 4 && size_of::<Rez>() == 40);
+const _: () = assert!(size_of::<Rez>() == 12 * 4 && size_of::<Rez>() == 48);
 const _: () = assert!(size_of::<SegmentPose>() == 12 + 4 && size_of::<SegmentPose>() == 16);
 const _: () = assert!(size_of::<RezVertex>() == 12 && size_of::<RezTriangle>() == 16 && size_of::<RezMaterial>() == 32);
 const _: () = assert!(
@@ -468,7 +480,7 @@ const _: () = assert!(
 );
 const _: () = assert!(size_of::<CreatureState>() == 4 + 12 + 4 + 12 + 4 + 4 + 4 + TRAILING_SEGMENTS_MAX * 16 && size_of::<CreatureState>() == 156);
 const _: () = assert!(size_of::<TickStateHeader>() == 8 + 4 + 4 && size_of::<TickStateHeader>() == 16);
-const _: () = assert!(size_of::<Actions>() == 8 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 4 && size_of::<Actions>() == 40);
+const _: () = assert!(size_of::<Actions>() == 8 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 7 * 4 + 7 * 4 + 4 && size_of::<Actions>() == 96);
 const _: () = assert!(size_of::<Event>() == 8 + 12 + 4 + 4 + 1 + 3 && size_of::<Event>() == 32);
 const _: () = assert!(size_of::<Derez>() == 8 + 4 + 4 && size_of::<Derez>() == 16);
 const _: () = assert!(size_of::<Refused>() == 8 + 4 + 1 + 3 && size_of::<Refused>() == 16);
@@ -488,7 +500,7 @@ mod tests {
         assert_eq!(exact_payload_bytes(MessageType::Welcome), Some(24));
         assert_eq!(exact_payload_bytes(MessageType::Rez), None);
         assert_eq!(exact_payload_bytes(MessageType::TickState), None);
-        assert_eq!(exact_payload_bytes(MessageType::Actions), Some(40));
+        assert_eq!(exact_payload_bytes(MessageType::Actions), Some(96));
         assert_eq!(exact_payload_bytes(MessageType::Event), Some(32));
         assert_eq!(exact_payload_bytes(MessageType::Derez), Some(16));
         assert_eq!(exact_payload_bytes(MessageType::Ping), Some(8));
@@ -542,7 +554,7 @@ mod tests {
         assert_eq!(Role::Spectator as u8, 1);
         assert_eq!(Role::CreatureHost as u8, 2);
         assert_eq!(EventKind::Vocalisation as u8, 1);
-        assert_eq!(PROTOCOL_VERSION, 8);
+        assert_eq!(PROTOCOL_VERSION, 9);
         assert_eq!(DEFAULT_PORT, 30_702);
     }
 
@@ -611,9 +623,12 @@ mod tests {
     }
 
     #[test]
-    fn actions_carries_the_abis_twelve_bytes_twice_plus_the_address() {
-        let intent_bytes = size_of::<f32>() * 3;
-        assert_eq!(intent_bytes, 12, "TglActions is three floats; if that moved, this mirror moves with a version bump");
+    fn actions_carries_the_abis_forty_bytes_twice_plus_the_address() {
+        let intent_bytes = size_of::<f32>() * 3 + size_of::<f32>() * (SEGMENTS_MAX as usize - 1);
+        assert_eq!(
+            intent_bytes, 40,
+            "TglActions is three floats and seven servo targets; if that moved, this mirror moves with a version bump"
+        );
         assert_eq!(
             size_of::<Actions>(),
             8 + 4 + intent_bytes + intent_bytes + 4,

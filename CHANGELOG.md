@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The servos on the wire: protocol v9, client ABI 9.** The owner's third ruling (the undulation
+  must propel) and Master Control's Etape 8 make a chained body a row of servos at its pivots;
+  the gait is the creature's, so the wire carries it. `REZ` declares a body's servos by bound -
+  `max_joint_angle` (radians, what a servo is asked to hold at most) and `max_joint_torque`
+  (newton-metres) - and a bound of zero is no such actuator, the Program ABI's own rule, so a
+  worm declares servos and no velocity actuator while a point proxy declares the reverse;
+  finite, non-negative, and zero or set together, refused by name otherwise both ways
+  (`RezServoInvalid`). `ACTIONS` carries `joint_targets[7]` - the angle each servo is asked to
+  hold, joint k between segments k and k + 1 - and their tick-1 resend beside the speed, turn
+  and voice it carried (96 bytes; the reserved word moves to the end). Nothing is retired: a
+  body honours only the actuators it declared. Companions: master-control reads the targets and
+  the bounds (its gait bridge retires); the flagship's host relays them and its roster declares
+  the bounds per body; rc-worm brings its own gait.
 - **The copies beside a consumer no longer collide.** `lnk_copy_beside()` gives every consumer
   its own copy of the library, ordered after that consumer and after cargo - and consumers that
   share an output directory, a repository's test executables typically, therefore had two of

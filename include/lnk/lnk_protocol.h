@@ -49,7 +49,7 @@ extern "C"
     carries the header's fingerprint rather than this number, so two ends disagreeing about the
     bytes are refused even when they agree about the number; the number exists for the
     human-readable refusal. */
-#define LNK_PROTOCOL_VERSION 8u
+#define LNK_PROTOCOL_VERSION 9u
 
 /*! The port Master Control listens on when nobody names another - a default and only a
     default: the client's positional argument carries any host and port, and Master Control
@@ -226,6 +226,11 @@ typedef struct LnkRez {
     uint32_t segment_count;        /*!< Segments in the chain, the head counted: 1 to LNK_SEGMENTS_MAX. */
     float segment_spacing;         /*!< Metres between consecutive segments' origins along the head's path;
                                         zero for a chain of one, strictly positive and finite otherwise. */
+    float max_joint_angle;         /*!< Radians: the most a servo is asked to hold, the bound the server clamps
+                                        every joint target to. Zero means the body has no servos - a bound of
+                                        zero is no such actuator. Finite and non-negative, or refused. */
+    float max_joint_torque;        /*!< Newton-metres: the most a servo holds with. Zero with a zero angle,
+                                        positive with a positive one - refused otherwise. */
 } LnkRez;
 
 /*! One vertex position in body frame, metres. */
@@ -329,6 +334,11 @@ typedef struct LnkActions {
     float previous_forward_speed;  /*!< The tick-1 intent, resent whole. Zeroes when none exists. */
     float previous_turn_rate;      /*!< See previous_forward_speed. */
     float previous_vocalisation;   /*!< See previous_forward_speed. */
+    float joint_targets[LNK_SEGMENTS_MAX - 1u];          /*!< Radians: the angle each servo is asked to hold, joint k
+                                                              between segments k and k + 1, positive bending to the head's
+                                                              left; segment_count - 1 meaningful, the rest zero. Clamped
+                                                              server-side to max_joint_angle. The muscle. */
+    float previous_joint_targets[LNK_SEGMENTS_MAX - 1u]; /*!< The tick-1 targets, resent whole. Zeroes when none exist. */
     uint8_t reserved0[4];          /*!< Always zero. Named so the asserts can count it - the
                                         alternative is four bytes of invisible alignment padding,
                                         and invisible padding is exactly what this header refuses. */
@@ -465,7 +475,8 @@ LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkWorldDefinition, floor_cells) + LNK_MEMBER
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkRez, creature_id) + LNK_MEMBER_BYTES(LnkRez, max_forward_speed) + LNK_MEMBER_BYTES(LnkRez, max_turn_rate)
                           + LNK_MEMBER_BYTES(LnkRez, max_vocalisation_strength) + LNK_MEMBER_BYTES(LnkRez, max_contact_count)
                           + LNK_MEMBER_BYTES(LnkRez, vertex_count) + LNK_MEMBER_BYTES(LnkRez, triangle_count) + LNK_MEMBER_BYTES(LnkRez, material_count)
-                          + LNK_MEMBER_BYTES(LnkRez, segment_count) + LNK_MEMBER_BYTES(LnkRez, segment_spacing)
+                          + LNK_MEMBER_BYTES(LnkRez, segment_count) + LNK_MEMBER_BYTES(LnkRez, segment_spacing) + LNK_MEMBER_BYTES(LnkRez, max_joint_angle)
+                          + LNK_MEMBER_BYTES(LnkRez, max_joint_torque)
                       == sizeof(LnkRez),
                   "LnkRez has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkRezVertex, position) == sizeof(LnkRezVertex), "LnkRezVertex has padding: a member changed width.");
@@ -490,7 +501,8 @@ LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkTickStateHeader, tick) + LNK_MEMBER_BYTES(
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkActions, tick) + LNK_MEMBER_BYTES(LnkActions, creature_id) + LNK_MEMBER_BYTES(LnkActions, desired_forward_speed)
                           + LNK_MEMBER_BYTES(LnkActions, desired_turn_rate) + LNK_MEMBER_BYTES(LnkActions, vocalisation_strength)
                           + LNK_MEMBER_BYTES(LnkActions, previous_forward_speed) + LNK_MEMBER_BYTES(LnkActions, previous_turn_rate)
-                          + LNK_MEMBER_BYTES(LnkActions, previous_vocalisation) + LNK_MEMBER_BYTES(LnkActions, reserved0)
+                          + LNK_MEMBER_BYTES(LnkActions, previous_vocalisation) + LNK_MEMBER_BYTES(LnkActions, joint_targets)
+                          + LNK_MEMBER_BYTES(LnkActions, previous_joint_targets) + LNK_MEMBER_BYTES(LnkActions, reserved0)
                       == sizeof(LnkActions),
                   "LnkActions has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkEvent, tick) + LNK_MEMBER_BYTES(LnkEvent, position) + LNK_MEMBER_BYTES(LnkEvent, strength)
@@ -509,14 +521,13 @@ LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkPong, nonce) == sizeof(LnkPong), "LnkPong 
 LNK_STATIC_ASSERT(sizeof(LnkHello) == 48u, "LnkHello must be 48 bytes: version, fingerprint, role, reserved, world fingerprint.");
 LNK_STATIC_ASSERT(sizeof(LnkWelcome) == 24u, "LnkWelcome must be 24 bytes: tick, dt, client id, world fingerprint.");
 LNK_STATIC_ASSERT(sizeof(LnkWorldDefinition) == 40u, "LnkWorldDefinition must be 40 bytes: the floor's eight numbers, dt, and the standing height.");
-LNK_STATIC_ASSERT(sizeof(LnkRez) == 40u, "LnkRez must be 40 bytes: identity, the bounds, the contact budget, three counts, the chain's count and spacing.");
+LNK_STATIC_ASSERT(sizeof(LnkRez) == 48u, "LnkRez must be 48 bytes: identity, the bounds, the contact budget, three counts, the chain's count and spacing, the servos' angle and torque.");
 LNK_STATIC_ASSERT(sizeof(LnkRezVertex) == 12u && sizeof(LnkRezTriangle) == 16u && sizeof(LnkRezMaterial) == 32u,
                   "The REZ rows must stay exactly the sizes the length rule multiplies by.");
 LNK_STATIC_ASSERT(sizeof(LnkSegmentPose) == 16u, "LnkSegmentPose must be 16 bytes: position, yaw.");
 LNK_STATIC_ASSERT(sizeof(LnkCreatureState) == 156u, "LnkCreatureState must be 156 bytes: id, pose, velocity, voice, the chain's count and seven poses.");
 LNK_STATIC_ASSERT(sizeof(LnkTickStateHeader) == 16u, "LnkTickStateHeader must be 16 bytes: tick, count, reserved.");
-LNK_STATIC_ASSERT(sizeof(LnkActions) == 40u,
-                  "LnkActions must be 40 bytes: tick, id, TglActions' twelve, the previous tick's twelve resent, and a counted reserved word.");
+LNK_STATIC_ASSERT(sizeof(LnkActions) == 96u, "LnkActions must be 96 bytes: the tick, the identity, three actions, their tick-1 resend, seven servo targets, their tick-1 resend, and a reserved word.");
 LNK_STATIC_ASSERT(sizeof(LnkEvent) == 32u, "LnkEvent must be 32 bytes: tick, place, strength, cause, kind.");
 LNK_STATIC_ASSERT(sizeof(LnkDerez) == 16u, "LnkDerez must be 16 bytes: tick, id, reserved.");
 LNK_STATIC_ASSERT(sizeof(LnkRefused) == 16u, "LnkRefused must be 16 bytes: tick, id, reason, reserved.");

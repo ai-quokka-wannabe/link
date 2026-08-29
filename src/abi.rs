@@ -83,7 +83,7 @@ impl End {
 
 /// `LNK_CLIENT_ABI_VERSION`: bumped whenever the vtable or its rules change. The twin lives in
 /// `lnk_client.h`, and a test holds the two together.
-pub const LNK_CLIENT_ABI_VERSION: u32 = 8;
+pub const LNK_CLIENT_ABI_VERSION: u32 = 9;
 
 pub type LnkStatus = i32;
 
@@ -1213,6 +1213,8 @@ mod tests {
             previous_forward_speed: 1.25,
             previous_turn_rate: -0.5,
             previous_vocalisation: 0.0,
+            joint_targets: [0.0; 7],
+            previous_joint_targets: [0.0; 7],
             reserved0: [0; 4],
         };
         assert_eq!((table.send_actions)(client, &raw const actions), LNK_OK);
@@ -1311,6 +1313,8 @@ mod tests {
                     previous_forward_speed: 0.5,
                     previous_turn_rate: 0.0,
                     previous_vocalisation: 0.0,
+                    joint_targets: [0.0; 7],
+                    previous_joint_targets: [0.0; 7],
                     reserved0: [0; 4],
                 };
                 let verdict = (table.send_actions)(client, &raw const actions);
@@ -1515,6 +1519,8 @@ mod tests {
             material_count: 0,
             segment_count: 1,
             segment_spacing: 0.0,
+            max_joint_angle: 0.0,
+            max_joint_torque: 0.0,
         }
     }
 

@@ -122,6 +122,9 @@ pub enum DecodeError {
     },
     /// A spacing that is not finite, not positive for a chain, or not zero for a single body.
     RezSpacingInvalid,
+    /// REZ declared servos that cannot be: a bound not finite or negative, or an angle
+    /// without torque or torque without an angle.
+    RezServoInvalid,
     /// A TICK_STATE row whose chain is empty or over the cap.
     SegmentCountOutOfRange {
         creature_id: u32,
@@ -179,6 +182,9 @@ pub enum EncodeError {
         count: u32,
     },
     RezSpacingInvalid,
+    /// REZ declared servos that cannot be: a bound not finite or negative, or an angle
+    /// without torque or torque without an angle.
+    RezServoInvalid,
     SegmentCountOutOfRange {
         creature_id: u32,
         count: u32,
@@ -338,7 +344,7 @@ pub fn decode(type_byte: u8, payload: &[u8]) -> Result<Message, DecodeError> {
                 world_fingerprint: read_u64(payload, 16),
             })),
             t if t == MessageType::Actions as u8 => {
-                if payload[36..40] != [0; 4] {
+                if payload[92..96] != [0; 4] {
                     return Err(DecodeError::ReservedNotZero);
                 }
                 Ok(Message::Actions(Actions {
@@ -350,6 +356,8 @@ pub fn decode(type_byte: u8, payload: &[u8]) -> Result<Message, DecodeError> {
                     previous_forward_speed: read_f32(payload, 24),
                     previous_turn_rate: read_f32(payload, 28),
                     previous_vocalisation: read_f32(payload, 32),
+                    joint_targets: read_f32x7(payload, 36),
+                    previous_joint_targets: read_f32x7(payload, 64),
                     reserved0: [0; 4],
                 }))
             }
@@ -421,6 +429,8 @@ fn decode_rez(payload: &[u8]) -> Result<Message, DecodeError> {
         material_count: read_u32(payload, 28),
         segment_count: read_u32(payload, 32),
         segment_spacing: read_f32(payload, 36),
+        max_joint_angle: read_f32(payload, 40),
+        max_joint_torque: read_f32(payload, 44),
     };
 
     if header.vertex_count > REZ_MAX_VERTICES || header.triangle_count > REZ_MAX_TRIANGLES || header.material_count > REZ_MAX_MATERIALS {
@@ -447,6 +457,9 @@ fn decode_rez(payload: &[u8]) -> Result<Message, DecodeError> {
     }
     if !spacing_fits(header.segment_count, header.segment_spacing) {
         return Err(DecodeError::RezSpacingInvalid);
+    }
+    if !servos_fit(header.max_joint_angle, header.max_joint_torque) {
+        return Err(DecodeError::RezServoInvalid);
     }
 
     let mut at = REZ_HEADER_BYTES;
@@ -573,6 +586,17 @@ fn decode_proprioception(payload: &[u8]) -> Result<Message, DecodeError> {
 }
 
 /// The spacing rule: finite always; zero for a chain of one, strictly positive otherwise.
+/// The servos' bounds as REZ may declare them: both finite and non-negative, and zero
+/// together or set together - a servo with no torque, or torque with no swing, is a body
+/// describing an actuator it does not have.
+fn servos_fit(max_joint_angle: f32, max_joint_torque: f32) -> bool {
+    max_joint_angle.is_finite()
+        && max_joint_torque.is_finite()
+        && max_joint_angle >= 0.0
+        && max_joint_torque >= 0.0
+        && ((max_joint_angle == 0.0) == (max_joint_torque == 0.0))
+}
+
 fn spacing_fits(segment_count: u32, spacing: f32) -> bool {
     spacing.is_finite() && if segment_count > 1 { spacing > 0.0 } else { spacing == 0.0 }
 }
@@ -715,6 +739,9 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             if !spacing_fits(header.segment_count, header.segment_spacing) {
                 return Err(EncodeError::RezSpacingInvalid);
             }
+            if !servos_fit(header.max_joint_angle, header.max_joint_torque) {
+                return Err(EncodeError::RezServoInvalid);
+            }
             for (index, triangle) in triangles.iter().enumerate() {
                 if triangle.vertices.iter().any(|vertex| *vertex >= header.vertex_count) || triangle.material >= header.material_count {
                     #[allow(clippy::cast_possible_truncation)]
@@ -755,6 +782,8 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             out.extend_from_slice(&header.material_count.to_le_bytes());
             out.extend_from_slice(&header.segment_count.to_le_bytes());
             out.extend_from_slice(&header.segment_spacing.to_le_bytes());
+            out.extend_from_slice(&header.max_joint_angle.to_le_bytes());
+            out.extend_from_slice(&header.max_joint_torque.to_le_bytes());
             for vertex in vertices {
                 for axis in vertex.position {
                     out.extend_from_slice(&axis.to_le_bytes());
@@ -846,6 +875,12 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             out.extend_from_slice(&actions.previous_forward_speed.to_le_bytes());
             out.extend_from_slice(&actions.previous_turn_rate.to_le_bytes());
             out.extend_from_slice(&actions.previous_vocalisation.to_le_bytes());
+            for target in &actions.joint_targets {
+                out.extend_from_slice(&target.to_le_bytes());
+            }
+            for target in &actions.previous_joint_targets {
+                out.extend_from_slice(&target.to_le_bytes());
+            }
             out.extend_from_slice(&actions.reserved0);
         }
         Message::Event(event) => {
@@ -956,6 +991,15 @@ fn read_u64(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(eight)
 }
 
+/// Seven floats in a row, the servo targets' shape.
+fn read_f32x7(payload: &[u8], at: usize) -> [f32; 7] {
+    let mut out = [0.0f32; 7];
+    for (index, value) in out.iter_mut().enumerate() {
+        *value = read_f32(payload, at + index * 4);
+    }
+    out
+}
+
 fn read_f32(bytes: &[u8], at: usize) -> f32 {
     f32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
 }
@@ -989,6 +1033,8 @@ mod tests {
             material_count: materials,
             segment_count: 1,
             segment_spacing: 0.0,
+            max_joint_angle: 0.0,
+            max_joint_torque: 0.0,
         };
         Message::Rez {
             header,
@@ -1029,6 +1075,8 @@ mod tests {
             header: Rez {
                 segment_count: SEGMENTS_MAX,
                 segment_spacing: 0.54,
+                max_joint_angle: 0.0,
+                max_joint_torque: 0.0,
                 ..header
             },
             vertices,
@@ -1124,6 +1172,8 @@ mod tests {
                 previous_forward_speed: 1.25,
                 previous_turn_rate: 0.5,
                 previous_vocalisation: 0.0,
+                joint_targets: [0.0; 7],
+                previous_joint_targets: [0.0; 7],
                 reserved0: [0; 4],
             }),
             Message::Event(Event {
@@ -1339,6 +1389,8 @@ mod tests {
                 previous_forward_speed: 1.25,
                 previous_turn_rate: 0.5,
                 previous_vocalisation: 0.0,
+                joint_targets: [0.0; 7],
+                previous_joint_targets: [0.0; 7],
                 reserved0: [0; 4],
             })
         }
@@ -1350,7 +1402,7 @@ mod tests {
         assert!(out.is_empty(), "a refused encode must write nothing");
 
         let mut frame = frame_of(&sample_actions());
-        let reserved_offset = FRAME_HEADER_BYTES + 36;
+        let reserved_offset = FRAME_HEADER_BYTES + 92;
         frame[reserved_offset] = 1;
         assert_eq!(decode(MessageType::Actions as u8, &frame[FRAME_HEADER_BYTES..]), Err(DecodeError::ReservedNotZero));
     }
@@ -1617,6 +1669,8 @@ mod tests {
                 header: Rez {
                     segment_count: count,
                     segment_spacing: spacing,
+                    max_joint_angle: 0.0,
+                    max_joint_torque: 0.0,
                     vertex_count: 0,
                     triangle_count: 0,
                     material_count: 0,
