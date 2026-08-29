@@ -49,7 +49,7 @@ extern "C"
     carries the header's fingerprint rather than this number, so two ends disagreeing about the
     bytes are refused even when they agree about the number; the number exists for the
     human-readable refusal. */
-#define LNK_PROTOCOL_VERSION 10u
+#define LNK_PROTOCOL_VERSION 11u
 
 /*! The port Master Control listens on when nobody names another - a default and only a
     default: the client's positional argument carries any host and port, and Master Control
@@ -264,20 +264,21 @@ typedef struct LnkRezMaterial {
     the head - the one rigid body physics steps - and up to seven trailing segments the world
     places along the head's recorded path, every one wearing the REZ's model; the joint between
     two segments is authored into the model itself, so the wire carries poses and nothing else.
-    Eight is a worm of eight icosahedra, and eight rows of sixteen bytes keep a full TICK_STATE
-    under a maximal REZ. */
+    Eight is a worm of eight icosahedra, and eight rows of twenty bytes make a full TICK_STATE
+    48,144 bytes - since v11 the larger legal frame, comfortably under the framing's ceiling. */
 #define LNK_SEGMENTS_MAX 8u
 
 /*! One trailing segment's pose: where it is and which way it faces, world space, the head's
-    conventions. Sixteen bytes. */
+    conventions. Twenty bytes. */
 typedef struct LnkSegmentPose {
     float position[3];      /*!< Metres, world space, right-handed, Y up. */
     float yaw;              /*!< Radians about +Y, right-handed. */
+    float pitch;            /*!< Radians about the segment's own right axis (+X in its frame), right-handed: positive is nose up. */
 } LnkSegmentPose;
 
 /*! One creature's row in a TICK_STATE: the head's pose, velocity and actuator, tick-stamped by
     the frame's header struct, then the chain - how many segments the creature has and the
-    poses of every trailing one, in a fixed array so a row is always the same 156 bytes and every
+    poses of every trailing one, in a fixed array so a row is always the same 188 bytes and every
     consumer copies rows by count. The slots beyond segment_count - 1 are zero, and a nonzero one
     is refused: the bytes of a tick are hashed and recorded, and a slot nobody means must not
     carry whatever was in memory. Every float is finite or the row is refused. */
@@ -285,6 +286,7 @@ typedef struct LnkCreatureState {
     uint32_t creature_id;   /*!< Stable for the creature's whole rez-to-derez life. */
     float position[3];      /*!< Metres, world space, right-handed, Y up. */
     float yaw;              /*!< Radians about +Y, right-handed - the roster's own convention. */
+    float pitch;            /*!< Radians about the head's right axis, positive nose up; zero for a single body, which the world keeps level. */
     float velocity[3];      /*!< Metres per second, world space. */
     float yaw_rate;         /*!< Radians per second about +Y. */
     float vocalisation;     /*!< The voice actuator as physics settled it, 0 when silent. */
@@ -303,9 +305,10 @@ typedef struct LnkTickStateHeader {
 } LnkTickStateHeader;
 
 /*! The most creatures one TICK_STATE may carry. A cap rather than a target: v1's world is a
-    dozen creatures. Since v7 a row carries its chain, so 256 rows is 39,952 bytes of payload
-    against the framing's 65,535 ceiling - it fits, and a maximal REZ is still the larger frame;
-    the headroom the cap once had to quadruple was spent on the chain, deliberately. */
+    dozen creatures. Since v7 a row carries its chain and since v11 every pose its pitch, so 256
+    rows is 48,144 bytes of payload against the framing's 65,535 ceiling - it fits, and it is now
+    the larger legal frame, a maximal REZ being 45,616; the headroom the cap once had to
+    quadruple was spent on the chain, deliberately. */
 #define LNK_TICK_STATE_MAX_CREATURES 256u
 
 /*! ACTIONS, creature host to server: the Program's staged intent for a future tick - the twelve
@@ -387,7 +390,7 @@ typedef struct LnkContact {
     contact_count LnkContact rows that follow this header in the same frame. A spectator never
     receives it; a server never receives it - this library's server half treats the frame
     arriving at the server as the same protocol violation as ACTIONS from a spectator, and the
-    sending half refuses to stage it on a client-held connection. Sixty-four bytes. */
+    sending half refuses to stage it on a client-held connection. Ninety-six bytes. */
 typedef struct LnkProprioception {
     uint64_t tick;
     uint32_t creature_id;
@@ -399,8 +402,13 @@ typedef struct LnkProprioception {
         zero, all zero for a body of one segment. The encoder's reading - what the joint did, not
         what it was asked - so a Program can close its gait on what it feels. Finite always. */
     float joint_angles[LNK_SEGMENTS_MAX - 1u];
+    /*! The torque each servo holds its angle with at the tick's end, newton-metres, signed in the
+        angle's sense; at most the body's declared max_joint_torque in magnitude, and exactly that
+        when the servo stalls. A motor's current sense, a tendon's organ: the load the joint bears,
+        which no pose can yield. Same slots as the angles. Finite always. */
+    float joint_torques[LNK_SEGMENTS_MAX - 1u];
     uint32_t contact_count;     /*!< Rows that follow, at most LNK_CONTACTS_MAX. */
-    uint8_t reserved1[4];       /*!< Always zero: rounds the letter to its alignment. Named so the asserts can count it. */
+    uint8_t reserved1[8];       /*!< Always zero: rounds the letter to its alignment. Named so the asserts can count it. */
 } LnkProprioception;
 
 /*! DEREZ, server to every client: the creature leaves the world at this tick. A leave is a
@@ -493,12 +501,13 @@ LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkRezMaterial, colour) + LNK_MEMBER_BYTES(Ln
                       == sizeof(LnkRezMaterial),
                   "LnkRezMaterial has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkCreatureState, creature_id) + LNK_MEMBER_BYTES(LnkCreatureState, position) + LNK_MEMBER_BYTES(LnkCreatureState, yaw)
+                          + LNK_MEMBER_BYTES(LnkCreatureState, pitch)
                           + LNK_MEMBER_BYTES(LnkCreatureState, velocity) + LNK_MEMBER_BYTES(LnkCreatureState, yaw_rate)
                           + LNK_MEMBER_BYTES(LnkCreatureState, vocalisation) + LNK_MEMBER_BYTES(LnkCreatureState, segment_count)
                           + LNK_MEMBER_BYTES(LnkCreatureState, segments)
                       == sizeof(LnkCreatureState),
                   "LnkCreatureState has padding: a member changed width.");
-LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkSegmentPose, position) + LNK_MEMBER_BYTES(LnkSegmentPose, yaw) == sizeof(LnkSegmentPose),
+LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkSegmentPose, position) + LNK_MEMBER_BYTES(LnkSegmentPose, yaw) + LNK_MEMBER_BYTES(LnkSegmentPose, pitch) == sizeof(LnkSegmentPose),
                   "LnkSegmentPose has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkTickStateHeader, tick) + LNK_MEMBER_BYTES(LnkTickStateHeader, creature_count)
                           + LNK_MEMBER_BYTES(LnkTickStateHeader, reserved0)
@@ -530,22 +539,23 @@ LNK_STATIC_ASSERT(sizeof(LnkWorldDefinition) == 40u, "LnkWorldDefinition must be
 LNK_STATIC_ASSERT(sizeof(LnkRez) == 48u, "LnkRez must be 48 bytes: identity, the bounds, the contact budget, three counts, the chain's count and spacing, the servos' angle and torque.");
 LNK_STATIC_ASSERT(sizeof(LnkRezVertex) == 12u && sizeof(LnkRezTriangle) == 16u && sizeof(LnkRezMaterial) == 32u,
                   "The REZ rows must stay exactly the sizes the length rule multiplies by.");
-LNK_STATIC_ASSERT(sizeof(LnkSegmentPose) == 16u, "LnkSegmentPose must be 16 bytes: position, yaw.");
-LNK_STATIC_ASSERT(sizeof(LnkCreatureState) == 156u, "LnkCreatureState must be 156 bytes: id, pose, velocity, voice, the chain's count and seven poses.");
+LNK_STATIC_ASSERT(sizeof(LnkSegmentPose) == 20u, "LnkSegmentPose must be 20 bytes: position, yaw, pitch.");
+LNK_STATIC_ASSERT(sizeof(LnkCreatureState) == 188u, "LnkCreatureState must be 188 bytes: id, pose with pitch, velocity, voice, the chain's count and seven poses.");
 LNK_STATIC_ASSERT(sizeof(LnkTickStateHeader) == 16u, "LnkTickStateHeader must be 16 bytes: tick, count, reserved.");
 LNK_STATIC_ASSERT(sizeof(LnkActions) == 96u, "LnkActions must be 96 bytes: the tick, the identity, three actions, their tick-1 resend, seven servo targets, their tick-1 resend, and a reserved word.");
 LNK_STATIC_ASSERT(sizeof(LnkEvent) == 32u, "LnkEvent must be 32 bytes: tick, place, strength, cause, kind.");
 LNK_STATIC_ASSERT(sizeof(LnkDerez) == 16u, "LnkDerez must be 16 bytes: tick, id, reserved.");
 LNK_STATIC_ASSERT(sizeof(LnkRefused) == 16u, "LnkRefused must be 16 bytes: tick, id, reason, reserved.");
 LNK_STATIC_ASSERT(sizeof(LnkContact) == 52u, "LnkContact must be 52 bytes: position, impulse, normal, depth, slip.");
-LNK_STATIC_ASSERT(sizeof(LnkProprioception) == 64u, "LnkProprioception must be 64 bytes: tick, id, grounded, reserved, force, seven servo angles, count, reserved.");
+LNK_STATIC_ASSERT(sizeof(LnkProprioception) == 96u, "LnkProprioception must be 96 bytes: tick, id, grounded, reserved, force, seven servo angles, seven servo torques, count, reserved.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkContact, position) + LNK_MEMBER_BYTES(LnkContact, impulse) + LNK_MEMBER_BYTES(LnkContact, normal)
                           + LNK_MEMBER_BYTES(LnkContact, depth) + LNK_MEMBER_BYTES(LnkContact, slip)
                       == sizeof(LnkContact),
                   "LnkContact has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkProprioception, tick) + LNK_MEMBER_BYTES(LnkProprioception, creature_id) + LNK_MEMBER_BYTES(LnkProprioception, grounded)
                           + LNK_MEMBER_BYTES(LnkProprioception, reserved0) + LNK_MEMBER_BYTES(LnkProprioception, specific_force)
-                          + LNK_MEMBER_BYTES(LnkProprioception, joint_angles) + LNK_MEMBER_BYTES(LnkProprioception, contact_count)
+                          + LNK_MEMBER_BYTES(LnkProprioception, joint_angles) + LNK_MEMBER_BYTES(LnkProprioception, joint_torques)
+                          + LNK_MEMBER_BYTES(LnkProprioception, contact_count)
                           + LNK_MEMBER_BYTES(LnkProprioception, reserved1)
                       == sizeof(LnkProprioception),
                   "LnkProprioception has padding: a member changed width.");

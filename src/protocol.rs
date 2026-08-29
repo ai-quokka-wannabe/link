@@ -20,7 +20,7 @@ compile_error!("The Link protocol is little-endian on the wire; a big-endian hos
 /// `LNK_PROTOCOL_VERSION`: bumped whenever any declaration changes meaning or layout. The
 /// handshake carries the header's fingerprint rather than this number; the number exists for
 /// the human-readable refusal.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// `LNK_DEFAULT_PORT`: where Master Control listens when nobody names another port. A default
 /// and only a default. The number is the owner's: 30702, from JA-307020 — Tron's program
@@ -244,13 +244,14 @@ pub const REZ_MAX_MATERIALS: u32 = 16;
 /// The most segments one creature's chain may have, the head counted: a chain is the head -
 /// today's rigid body - and up to seven trailing segments the world places along the head's
 /// recorded path (protocol v7; TOPOLOGY.md § The chain). Eight is a worm of eight icosahedra,
-/// and eight rows of sixteen bytes keep a full TICK_STATE under a maximal REZ.
+/// and eight rows of twenty bytes make a full TICK_STATE 48,144 bytes - since v11 the larger
+/// legal frame, and comfortably under the framing's ceiling.
 pub const SEGMENTS_MAX: u32 = 8;
 /// The trailing segments a [`CreatureState`] row carries: every segment but the head.
 pub const TRAILING_SEGMENTS_MAX: usize = (SEGMENTS_MAX - 1) as usize;
 
 /// One trailing segment's pose: where it is and which way it faces, world space, the head's
-/// conventions. Sixteen bytes, no padding.
+/// conventions. Twenty bytes, no padding.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct SegmentPose {
@@ -258,11 +259,14 @@ pub struct SegmentPose {
     pub position: [f32; 3],
     /// Radians about +Y, right-handed.
     pub yaw: f32,
+    /// Radians about the segment's own right axis (+X in its frame), right-handed: positive is
+    /// nose up. A segment over a terrace edge droops from its pivot; on the flat it is zero.
+    pub pitch: f32,
 }
 
 /// One creature's row in a TICK_STATE: the head's pose, velocity and actuator, then the chain -
 /// how many segments the creature has and the poses of every trailing one, in a fixed array
-/// so a row is always the same 156 bytes and every consumer copies rows by count. The slots
+/// so a row is always the same 188 bytes and every consumer copies rows by count. The slots
 /// beyond `segment_count - 1` are zero, and a nonzero one is refused: the bytes of a tick are
 /// hashed and recorded, and a slot nobody means must not carry whatever was in memory.
 #[repr(C)]
@@ -274,6 +278,9 @@ pub struct CreatureState {
     pub position: [f32; 3],
     /// Radians about +Y, right-handed — the roster's own convention.
     pub yaw: f32,
+    /// Radians about the head's right axis, positive nose up: zero for a single body, which the
+    /// world keeps level; a chain's head pitches as its own vertices meet the floor.
+    pub pitch: f32,
     /// Metres per second, world space.
     pub velocity: [f32; 3],
     /// Radians per second about +Y.
@@ -371,8 +378,8 @@ pub struct Contact {
 
 /// PROPRIOCEPTION, server to the one host that owns the creature - a letter, not a broadcast.
 /// Every tick after that tick's TICK_STATE: the specific force, whether the feet are on the
-/// ground, the angle every servo holds, and `contact_count` [`Contact`] rows in the same
-/// frame. Sixty-four bytes.
+/// ground, the angle every servo holds and the torque it holds it with, and `contact_count`
+/// [`Contact`] rows in the same frame. Ninety-six bytes.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Proprioception {
@@ -389,10 +396,15 @@ pub struct Proprioception {
     /// The encoder's reading - what the joint did, not what it was asked - so a Program can
     /// close its gait on what it feels. Finite always.
     pub joint_angles: [f32; SEGMENTS_MAX as usize - 1],
+    /// The torque each servo holds its angle with at the tick's end, newton-metres, signed in
+    /// the angle's sense; at most the body's declared `max_joint_torque` in magnitude, and at
+    /// exactly that when the servo stalls. A motor's current sense, a tendon's organ: the load
+    /// the joint bears, which no pose can yield. Same slots as the angles. Finite always.
+    pub joint_torques: [f32; SEGMENTS_MAX as usize - 1],
     pub contact_count: u32,
-    /// Always zero: the four bytes that round the letter to its alignment, named so
+    /// Always zero: the eight bytes that round the letter to its alignment, named so
     /// nothing on the wire is left unwritten.
-    pub reserved1: [u8; 4],
+    pub reserved1: [u8; 8],
 }
 
 /// DEREZ, server to every client: the creature leaves the world at this tick.
@@ -479,7 +491,7 @@ const _: () = assert!(size_of::<Hello>() == 4 + 32 + 1 + 3 + 8 && size_of::<Hell
 const _: () = assert!(size_of::<Welcome>() == 8 + 4 + 4 + 8 && size_of::<Welcome>() == 24);
 const _: () = assert!(size_of::<WorldDefinition>() == 10 * 4 && size_of::<WorldDefinition>() == 40);
 const _: () = assert!(size_of::<Rez>() == 12 * 4 && size_of::<Rez>() == 48);
-const _: () = assert!(size_of::<SegmentPose>() == 12 + 4 && size_of::<SegmentPose>() == 16);
+const _: () = assert!(size_of::<SegmentPose>() == 12 + 4 + 4 && size_of::<SegmentPose>() == 20);
 const _: () = assert!(size_of::<RezVertex>() == 12 && size_of::<RezTriangle>() == 16 && size_of::<RezMaterial>() == 32);
 const _: () = assert!(
     size_of::<Rez>()
@@ -488,14 +500,14 @@ const _: () = assert!(
         + REZ_MAX_MATERIALS as usize * size_of::<RezMaterial>()
         <= FRAME_PAYLOAD_LIMIT
 );
-const _: () = assert!(size_of::<CreatureState>() == 4 + 12 + 4 + 12 + 4 + 4 + 4 + TRAILING_SEGMENTS_MAX * 16 && size_of::<CreatureState>() == 156);
+const _: () = assert!(size_of::<CreatureState>() == 4 + 12 + 4 + 4 + 12 + 4 + 4 + 4 + TRAILING_SEGMENTS_MAX * 20 && size_of::<CreatureState>() == 188);
 const _: () = assert!(size_of::<TickStateHeader>() == 8 + 4 + 4 && size_of::<TickStateHeader>() == 16);
 const _: () = assert!(size_of::<Actions>() == 8 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 7 * 4 + 7 * 4 + 4 && size_of::<Actions>() == 96);
 const _: () = assert!(size_of::<Event>() == 8 + 12 + 4 + 4 + 1 + 3 && size_of::<Event>() == 32);
 const _: () = assert!(size_of::<Derez>() == 8 + 4 + 4 && size_of::<Derez>() == 16);
 const _: () = assert!(size_of::<Refused>() == 8 + 4 + 1 + 3 && size_of::<Refused>() == 16);
 const _: () = assert!(size_of::<Contact>() == 52);
-const _: () = assert!(size_of::<Proprioception>() == 8 + 4 + 1 + 3 + 12 + 28 + 4 + 4 && size_of::<Proprioception>() == 64);
+const _: () = assert!(size_of::<Proprioception>() == 8 + 4 + 1 + 3 + 12 + 28 + 28 + 4 + 8 && size_of::<Proprioception>() == 96);
 const _: () = assert!(size_of::<Proprioception>() + CONTACTS_MAX as usize * size_of::<Contact>() <= FRAME_PAYLOAD_LIMIT);
 const _: () = assert!(size_of::<Ping>() == 8 && size_of::<Pong>() == 8);
 const _: () = assert!(size_of::<TickStateHeader>() + TICK_STATE_MAX_CREATURES as usize * size_of::<CreatureState>() <= FRAME_PAYLOAD_LIMIT);
@@ -538,19 +550,21 @@ mod tests {
     }
 
     #[test]
-    fn a_full_tick_state_fits_one_frame_and_a_maximal_rez_still_outweighs_it() {
-        // Since v7 a row carries its chain, so a full tick is 39,952 bytes rather than 10,256:
-        // it fits one frame, and a maximal REZ (45,600) is still the frame the receive buffer
-        // is sized by. The headroom the cap once had to quadruple is spent; the framing is now
-        // exactly as interesting as TOPOLOGY.md's delta-compression trigger says it may become.
+    fn a_full_tick_state_fits_one_frame_and_since_v11_outweighs_a_maximal_rez() {
+        // Since v7 a row carries its chain and since v11 every pose its pitch, so a full tick is
+        // 48,144 bytes rather than v6's 10,256: it fits one frame, and it is now the frame the
+        // receive buffer is sized by - a maximal REZ (45,616) no longer outweighs it. The
+        // headroom the cap once had to quadruple is spent; the framing is now exactly as
+        // interesting as TOPOLOGY.md's delta-compression trigger says it may become.
         let full = size_of::<TickStateHeader>() + TICK_STATE_MAX_CREATURES as usize * size_of::<CreatureState>();
-        assert_eq!(full, 39_952);
+        assert_eq!(full, 48_144);
         assert!(full <= FRAME_PAYLOAD_LIMIT);
         let rez = size_of::<Rez>()
             + REZ_MAX_VERTICES as usize * size_of::<RezVertex>()
             + REZ_MAX_TRIANGLES as usize * size_of::<RezTriangle>()
             + REZ_MAX_MATERIALS as usize * size_of::<RezMaterial>();
-        assert!(rez > full, "the premise the receive buffer rests on: a full body outweighs a full tick");
+        assert_eq!(rez, 45_616);
+        assert!(full > rez, "since v11 the receive buffer rests on the tick: a full world outweighs a full body");
     }
 
     #[test]
@@ -564,7 +578,7 @@ mod tests {
         assert_eq!(Role::Spectator as u8, 1);
         assert_eq!(Role::CreatureHost as u8, 2);
         assert_eq!(EventKind::Vocalisation as u8, 1);
-        assert_eq!(PROTOCOL_VERSION, 10);
+        assert_eq!(PROTOCOL_VERSION, 11);
         assert_eq!(DEFAULT_PORT, 30_702);
     }
 

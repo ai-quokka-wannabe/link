@@ -241,7 +241,8 @@ const fn max_rez_payload_bytes() -> usize {
 }
 
 /// The most bytes any legal frame occupies on the wire, header included — a receive buffer this
-/// big can hold anything a lawful end may send. A maximal REZ outweighs a full TICK_STATE.
+/// big can hold anything a lawful end may send. Since v11 a full TICK_STATE (48,144 bytes)
+/// outweighs a maximal REZ (45,616); from v4 to v10 it was the other way about.
 #[must_use]
 pub const fn max_frame_bytes() -> usize {
     let tick = TICK_HEADER_BYTES + TICK_STATE_MAX_CREATURES as usize * CREATURE_STATE_BYTES;
@@ -548,10 +549,10 @@ fn decode_proprioception(payload: &[u8]) -> Result<Message, DecodeError> {
     if payload[13..16] != [0u8; 3] {
         return Err(DecodeError::ReservedNotZero);
     }
-    if payload[60..64] != [0u8; 4] {
+    if payload[88..96] != [0u8; 8] {
         return Err(DecodeError::ReservedNotZero);
     }
-    let count = read_u32(payload, 56);
+    let count = read_u32(payload, 84);
     let rows_by_length = (payload.len() - PROPRIOCEPTION_HEADER_BYTES) / CONTACT_BYTES;
     if count as usize != rows_by_length {
         return Err(DecodeError::ContactsLengthMismatch { count, rows_by_length });
@@ -562,6 +563,10 @@ fn decode_proprioception(payload: &[u8]) -> Result<Message, DecodeError> {
     }
     let joint_angles = read_f32x7(payload, 28);
     if joint_angles.iter().any(|angle| !angle.is_finite()) {
+        return Err(DecodeError::ProprioceptionNotFinite);
+    }
+    let joint_torques = read_f32x7(payload, 56);
+    if joint_torques.iter().any(|torque| !torque.is_finite()) {
         return Err(DecodeError::ProprioceptionNotFinite);
     }
     let mut contacts = Vec::with_capacity(rows_by_length);
@@ -587,8 +592,9 @@ fn decode_proprioception(payload: &[u8]) -> Result<Message, DecodeError> {
             reserved0: [0; 3],
             specific_force,
             joint_angles,
+            joint_torques,
             contact_count: count,
-            reserved1: [0; 4],
+            reserved1: [0; 8],
         },
         contacts,
     })
@@ -616,10 +622,10 @@ fn state_floats(state: &CreatureState) -> impl Iterator<Item = f32> + '_ {
         .position
         .iter()
         .copied()
-        .chain(std::iter::once(state.yaw))
+        .chain([state.yaw, state.pitch])
         .chain(state.velocity.iter().copied())
         .chain([state.yaw_rate, state.vocalisation])
-        .chain(state.segments.iter().flat_map(|pose| pose.position.iter().copied().chain(std::iter::once(pose.yaw))))
+        .chain(state.segments.iter().flat_map(|pose| pose.position.iter().copied().chain([pose.yaw, pose.pitch])))
 }
 
 /// The chain rules of one row, both ways: a count in range, every float finite, every slot
@@ -636,7 +642,7 @@ fn judge_state(state: &CreatureState) -> Result<(), (u32, u32)> {
     let meaningful = (state.segment_count - 1) as usize;
     if state.segments[meaningful..]
         .iter()
-        .any(|pose| pose.position.iter().any(|axis| axis.to_bits() != 0) || pose.yaw.to_bits() != 0)
+        .any(|pose| pose.position.iter().any(|axis| axis.to_bits() != 0) || pose.yaw.to_bits() != 0 || pose.pitch.to_bits() != 0)
     {
         return Err((3, 0));
     }
@@ -660,16 +666,18 @@ fn decode_tick_state(payload: &[u8]) -> Result<Message, DecodeError> {
             creature_id: read_u32(payload, at),
             position: [read_f32(payload, at + 4), read_f32(payload, at + 8), read_f32(payload, at + 12)],
             yaw: read_f32(payload, at + 16),
-            velocity: [read_f32(payload, at + 20), read_f32(payload, at + 24), read_f32(payload, at + 28)],
-            yaw_rate: read_f32(payload, at + 32),
-            vocalisation: read_f32(payload, at + 36),
-            segment_count: read_u32(payload, at + 40),
+            pitch: read_f32(payload, at + 20),
+            velocity: [read_f32(payload, at + 24), read_f32(payload, at + 28), read_f32(payload, at + 32)],
+            yaw_rate: read_f32(payload, at + 36),
+            vocalisation: read_f32(payload, at + 40),
+            segment_count: read_u32(payload, at + 44),
             segments: [SegmentPose::default(); TRAILING_SEGMENTS_MAX],
         };
         for (slot, pose) in state.segments.iter_mut().enumerate() {
-            let base = at + 44 + slot * size_of::<SegmentPose>();
+            let base = at + 48 + slot * size_of::<SegmentPose>();
             pose.position = [read_f32(payload, base), read_f32(payload, base + 4), read_f32(payload, base + 8)];
             pose.yaw = read_f32(payload, base + 12);
+            pose.pitch = read_f32(payload, base + 16);
         }
         match judge_state(&state) {
             Ok(()) => {}
@@ -857,6 +865,7 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
                     out.extend_from_slice(&axis.to_le_bytes());
                 }
                 out.extend_from_slice(&state.yaw.to_le_bytes());
+                out.extend_from_slice(&state.pitch.to_le_bytes());
                 for axis in state.velocity {
                     out.extend_from_slice(&axis.to_le_bytes());
                 }
@@ -868,6 +877,7 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
                         out.extend_from_slice(&axis.to_le_bytes());
                     }
                     out.extend_from_slice(&pose.yaw.to_le_bytes());
+                    out.extend_from_slice(&pose.pitch.to_le_bytes());
                 }
             }
         }
@@ -922,11 +932,12 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             if header.grounded > 1 {
                 return Err(EncodeError::InvalidGrounded(header.grounded));
             }
-            if header.reserved0 != [0; 3] || header.reserved1 != [0; 4] {
+            if header.reserved0 != [0; 3] || header.reserved1 != [0; 8] {
                 return Err(EncodeError::ReservedNotZero);
             }
             if header.specific_force.iter().any(|axis| !axis.is_finite())
                 || header.joint_angles.iter().any(|angle| !angle.is_finite())
+                || header.joint_torques.iter().any(|torque| !torque.is_finite())
                 || contacts.iter().any(|contact| contact_values(contact).any(|value| !value.is_finite()))
             {
                 return Err(EncodeError::ProprioceptionNotFinite);
@@ -942,8 +953,11 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             for angle in header.joint_angles {
                 out.extend_from_slice(&angle.to_le_bytes());
             }
+            for torque in header.joint_torques {
+                out.extend_from_slice(&torque.to_le_bytes());
+            }
             out.extend_from_slice(&header.contact_count.to_le_bytes());
-            out.extend_from_slice(&[0; 4]);
+            out.extend_from_slice(&[0; 8]);
             for contact in contacts {
                 for value in contact_values(contact) {
                     out.extend_from_slice(&value.to_le_bytes());
@@ -1111,8 +1125,9 @@ mod tests {
                 reserved0: [0; 3],
                 specific_force: [0.0, 9.81, -0.5],
                 joint_angles: [0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7],
+                joint_torques: [1.5, -2.5, 3.5, -4.5, 0.5, -0.25, 5.0],
                 contact_count: contacts,
-                reserved1: [0; 4],
+                reserved1: [0; 8],
             },
             contacts: (0..contacts)
                 .map(|index| Contact {
@@ -1133,6 +1148,7 @@ mod tests {
             *pose = SegmentPose {
                 position: [slot as f32, 2.0, 3.0 + slot as f32 * 0.5],
                 yaw: 0.1 * slot as f32,
+                pitch: -0.05 * slot as f32,
             };
         }
         segments
@@ -1144,6 +1160,7 @@ mod tests {
                 creature_id: index,
                 position: [1.0, 2.0, 3.0],
                 yaw: 0.5,
+                pitch: 0.1,
                 velocity: [-1.0, 0.0, 4.5],
                 yaw_rate: -0.25,
                 vocalisation: 0.75,
@@ -1434,27 +1451,28 @@ mod tests {
 
     #[test]
     fn the_receive_buffer_constant_really_is_the_largest_legal_frame() {
-        // Since protocol v4 the largest legal frame is a full REZ, not a full tick: the body
-        // outweighs the world, and the receive buffer is sized by whichever is larger. v7's
-        // chains grew the tick to 39,952 bytes; a maximal REZ is 45,600, so the premise holds.
+        // The receive buffer is sized by whichever legal frame is larger. From v4 a maximal REZ
+        // (45,616 bytes) outweighed a full tick; v7's chains grew the tick to 39,952 and v11's
+        // pitch on every pose to 48,144, so since v11 the world outweighs the body. Both sit
+        // under the framing's 65,535 ceiling, and the constant follows the larger.
         let largest_rez = frame_of(&sample_rez(REZ_MAX_VERTICES, REZ_MAX_TRIANGLES, REZ_MAX_MATERIALS));
         let largest_tick = frame_of(&sample_tick_state(TICK_STATE_MAX_CREATURES));
         assert_eq!(largest_rez.len().max(largest_tick.len()), max_frame_bytes());
-        assert!(largest_rez.len() > largest_tick.len(), "the premise: a full body outweighs a full tick");
+        assert!(largest_tick.len() > largest_rez.len(), "since v11 a full tick outweighs a full body");
         assert!(max_frame_bytes() <= FRAME_HEADER_BYTES + FRAME_PAYLOAD_LIMIT);
     }
 
     #[test]
     fn a_proprioception_is_judged_at_the_header_and_refused_by_name() {
         // Header-time: ragged, over the cap.
-        assert_eq!(check_length(PayloadRule::Proprioception, 64 + 52 * CONTACTS_MAX as usize), Ok(()));
-        assert!(matches!(check_length(PayloadRule::Proprioception, 63), Err(DecodeError::RaggedProprioception { .. })));
+        assert_eq!(check_length(PayloadRule::Proprioception, 96 + 52 * CONTACTS_MAX as usize), Ok(()));
+        assert!(matches!(check_length(PayloadRule::Proprioception, 95), Err(DecodeError::RaggedProprioception { .. })));
         assert!(matches!(
-            check_length(PayloadRule::Proprioception, 64 + 51),
+            check_length(PayloadRule::Proprioception, 96 + 51),
             Err(DecodeError::RaggedProprioception { .. })
         ));
         assert_eq!(
-            check_length(PayloadRule::Proprioception, 64 + 52 * (CONTACTS_MAX as usize + 1)),
+            check_length(PayloadRule::Proprioception, 96 + 52 * (CONTACTS_MAX as usize + 1)),
             Err(DecodeError::ContactsOverCap { count: CONTACTS_MAX + 1 })
         );
 
@@ -1463,7 +1481,7 @@ mod tests {
         let frame = frame_of(&sample_proprioception(2));
         let payload = &frame[FRAME_HEADER_BYTES..];
         let mut lying = payload.to_vec();
-        lying[56..60].copy_from_slice(&3u32.to_le_bytes());
+        lying[84..88].copy_from_slice(&3u32.to_le_bytes());
         assert_eq!(
             decode(MessageType::Proprioception as u8, &lying),
             Err(DecodeError::ContactsLengthMismatch { count: 3, rows_by_length: 2 })
@@ -1475,9 +1493,9 @@ mod tests {
         reserved[14] = 1;
         assert_eq!(decode(MessageType::Proprioception as u8, &reserved), Err(DecodeError::ReservedNotZero));
         let mut tail = payload.to_vec();
-        tail[61] = 1;
+        tail[93] = 1;
         assert_eq!(decode(MessageType::Proprioception as u8, &tail), Err(DecodeError::ReservedNotZero));
-        for offset in [16usize, 28 + 4 * 3, 64 + 4, 64 + 52 + 44] {
+        for offset in [16usize, 28 + 4 * 3, 56 + 4 * 6, 96 + 4, 96 + 52 + 44] {
             let mut poisoned = payload.to_vec();
             poisoned[offset..offset + 4].copy_from_slice(&f32::NAN.to_le_bytes());
             assert_eq!(
@@ -1553,8 +1571,20 @@ mod tests {
             ),
             Err(EncodeError::ProprioceptionNotFinite)
         );
+        let mut hot = header;
+        hot.joint_torques[0] = f32::NAN;
+        assert_eq!(
+            encode(
+                &Message::Proprioception {
+                    header: hot,
+                    contacts: contacts.clone()
+                },
+                &mut out
+            ),
+            Err(EncodeError::ProprioceptionNotFinite)
+        );
         let mut tail = header;
-        tail.reserved1 = [0, 0, 1, 0];
+        tail.reserved1 = [0, 0, 1, 0, 0, 0, 0, 0];
         assert_eq!(
             encode(&Message::Proprioception { header: tail, contacts }, &mut out),
             Err(EncodeError::ReservedNotZero)
@@ -1804,7 +1834,7 @@ mod tests {
         });
         let row_at = FRAME_HEADER_BYTES + TICK_HEADER_BYTES;
         let mut over = honest_frame.clone();
-        over[row_at + 40..row_at + 44].copy_from_slice(&(SEGMENTS_MAX + 1).to_le_bytes());
+        over[row_at + 44..row_at + 48].copy_from_slice(&(SEGMENTS_MAX + 1).to_le_bytes());
         assert_eq!(
             decode(MessageType::TickState as u8, &over[FRAME_HEADER_BYTES..]),
             Err(DecodeError::SegmentCountOutOfRange {
@@ -1813,13 +1843,13 @@ mod tests {
             })
         );
         let mut nan = honest_frame.clone();
-        nan[row_at + 44 + 12..row_at + 44 + 16].copy_from_slice(&f32::NAN.to_le_bytes());
+        nan[row_at + 48 + 12..row_at + 48 + 16].copy_from_slice(&f32::NAN.to_le_bytes());
         assert_eq!(
             decode(MessageType::TickState as u8, &nan[FRAME_HEADER_BYTES..]),
             Err(DecodeError::TickStateNotFinite { creature_id: 0 })
         );
         let mut dead = honest_frame.clone();
-        dead[row_at + 44 + 16 * 4] = 1; // the fifth slot's first byte
+        dead[row_at + 48 + 20 * 4] = 1; // the fifth slot's first byte
         assert_eq!(
             decode(MessageType::TickState as u8, &dead[FRAME_HEADER_BYTES..]),
             Err(DecodeError::SegmentSlotNotZero { creature_id: 0 })
