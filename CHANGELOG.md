@@ -382,3 +382,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   choices, and the family, with the flagship's `docs/TOPOLOGY.md` named as the design authority
   that code here implements and never extends. TODO.md stages the five etapes from wire contract
   to first consumer, each carrying its red-first obligation.
+
+### Fixed
+
+- **The cache cleanup runs itself.** `cleanup_caches.yml` was manual-only and had never been
+  dispatched here, and its script knew only the Vulkan, markdownlint and CodeQL key families, so
+  every `cargo-*`, `npm-*-lock-*` and `qt-*` generation fell into the never-delete fail-safe: a
+  changed lock file, toolchain pin or SDK version left the old entry behind until GitHub's own
+  eviction. Now, after every green `CI - Main Branch` run, the script prunes `refs/heads/main`
+  to the newest entry per family - cargo, npm, npm-markdownlint, Qt (per kit), Vulkan SDK (per
+  platform), CodeQL overlay base - and only there, so an open pull request's newer cache can
+  never evict main's live one; a closed pull request's caches are reclaimed by a second job;
+  the manual dry run stays. The pattern is the owner's arm-dev-env workflow. Verified by a dry
+  run on the branch before merging; the same files land in all four repositories.
