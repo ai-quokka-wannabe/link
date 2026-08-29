@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Rust 1.98.0.** The pin in `rust-toolchain.toml` moves from 1.95.0 (the Tool Updates watcher's
+  #29); rustfmt, clippy, the tests and rustdoc are clean under it without a change to the code.
+  The guides say 1.98.0 where they said 1.95.0.
 - **The servos on the wire: protocol v9, client ABI 9.** The owner's third ruling (the undulation
   must propel) and Master Control's Etape 8 make a chained body a row of servos at its pivots;
   the gait is the creature's, so the wire carries it. `REZ` declares a body's servos by bound -

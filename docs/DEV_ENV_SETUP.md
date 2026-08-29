@@ -25,7 +25,7 @@ version.
 
 | Tool | Version | Where to get it |
 |------|---------|-----------------|
-| rustup | any recent; **Rust 1.95.0** is pinned by `rust-toolchain.toml` and installed by rustup on first use | <https://rustup.rs/> |
+| rustup | any recent; **Rust 1.98.0** is pinned by `rust-toolchain.toml` and installed by rustup on first use | <https://rustup.rs/> |
 | A linker | Windows: the Visual Studio "Desktop development with C++" workload or its Build Tools; Linux: `build-essential` | <https://visualstudio.microsoft.com/downloads/> · `sudo apt install build-essential` |
 | Git | any recent | <https://git-scm.com/downloads> |
 | Python | 3.10 or newer, for `tools/check_protocol_version.py` | <https://www.python.org/downloads/> |
@@ -34,7 +34,7 @@ version.
 
 **There are no crates.** Link is `std` only: the protocol, the codec, the transport, the C ABI
 and the Disk recorder are all in the standard library's vocabulary. There is no `cargo install`
-step and no toolchain to choose - `rust-toolchain.toml` names `1.95.0` with `rustfmt` and
+step and no toolchain to choose - `rust-toolchain.toml` names `1.98.0` with `rustfmt` and
 `clippy`, rustup installs exactly that the first time cargo runs here, and CI refuses any
 workflow that installs a toolchain of its own. No submodules either: Link is the leaf every
 other repository points at.
@@ -53,7 +53,7 @@ cargo test --locked
 python tools/check_protocol_version.py check
 ```
 
-The first `cargo` run installs Rust 1.95.0. `cargo build --release` puts the library at
+The first `cargo` run installs Rust 1.98.0. `cargo build --release` puts the library at
 `target/release/link.dll` (`liblink.so` on Linux) beside the C headers in `include/lnk/`; nothing
 runs it by itself - Master Control and the Grid load it from beside their own executables.
 
@@ -136,7 +136,7 @@ then `npm run lint:md`); British English throughout.
 
 ## Troubleshooting
 
-### `cargo` says a version other than 1.95.0
+### `cargo` says a version other than 1.98.0
 
 Another Rust is in front of rustup on your `PATH`. Put rustup's `~/.cargo/bin` first, or remove
 the other; never edit the pin to match a machine.

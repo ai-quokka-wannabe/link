@@ -2,5 +2,5 @@
 # Pinned to an exact version for reproducible builds: a floating "stable" turns a green build
 # red the day a new rustc or clippy ships, which warnings-as-errors amplifies. rustup installs
 # this on first use, locally and in CI alike; bumping it is a deliberate commit.
-channel = "1.95.0"
+channel = "1.98.0"
 components = ["rustfmt", "clippy"]
