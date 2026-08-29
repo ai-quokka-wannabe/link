@@ -1806,7 +1806,9 @@ mod tests {
             grounded: 1,
             reserved0: [0; 3],
             specific_force: [0.0, 9.81, 0.0],
+            joint_angles: [0.0; 7],
             contact_count: 2,
+            reserved1: [0; 4],
         };
 
         let client_thread = std::thread::spawn(move || {
@@ -1972,7 +1974,9 @@ mod tests {
             grounded: 1,
             reserved0: [0; 3],
             specific_force: [0.0, 9.81, 0.0],
+            joint_angles: [0.0; 7],
             contact_count: 0,
+            reserved1: [0; 4],
         };
         assert_eq!((table.send_proprioception)(disk, &raw const letter, std::ptr::null()), LNK_OK);
         let mut view = unsafe { std::mem::zeroed::<MessageView>() };

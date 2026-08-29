@@ -923,7 +923,9 @@ mod tests {
                 grounded: 1,
                 reserved0: [0; 3],
                 specific_force: [0.0, 9.81, 0.0],
+                joint_angles: [0.0; 7],
                 contact_count: 0,
+                reserved1: [0; 4],
             },
             contacts: Vec::new(),
         };

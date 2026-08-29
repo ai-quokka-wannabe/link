@@ -49,7 +49,7 @@ extern "C"
     carries the header's fingerprint rather than this number, so two ends disagreeing about the
     bytes are refused even when they agree about the number; the number exists for the
     human-readable refusal. */
-#define LNK_PROTOCOL_VERSION 9u
+#define LNK_PROTOCOL_VERSION 10u
 
 /*! The port Master Control listens on when nobody names another - a default and only a
     default: the client's positional argument carries any host and port, and Master Control
@@ -387,14 +387,20 @@ typedef struct LnkContact {
     contact_count LnkContact rows that follow this header in the same frame. A spectator never
     receives it; a server never receives it - this library's server half treats the frame
     arriving at the server as the same protocol violation as ACTIONS from a spectator, and the
-    sending half refuses to stage it on a client-held connection. Thirty-two bytes. */
+    sending half refuses to stage it on a client-held connection. Sixty-four bytes. */
 typedef struct LnkProprioception {
     uint64_t tick;
     uint32_t creature_id;
     uint8_t grounded;           /*!< 1 when the feet touch the ground this tick, else 0. */
     uint8_t reserved0[3];       /*!< Always zero. Named so the asserts can count it. */
     float specific_force[3];    /*!< Metres per second squared, BODY frame - what an otolith reads; {0, +9.81, 0} at rest. */
+    /*! The angle each servo holds this tick, radians, joint k between segments k and k + 1 in the
+        sign LnkActions::joint_targets asks in, within a turn; segment_count - 1 meaningful, the rest
+        zero, all zero for a body of one segment. The encoder's reading - what the joint did, not
+        what it was asked - so a Program can close its gait on what it feels. Finite always. */
+    float joint_angles[LNK_SEGMENTS_MAX - 1u];
     uint32_t contact_count;     /*!< Rows that follow, at most LNK_CONTACTS_MAX. */
+    uint8_t reserved1[4];       /*!< Always zero: rounds the letter to its alignment. Named so the asserts can count it. */
 } LnkProprioception;
 
 /*! DEREZ, server to every client: the creature leaves the world at this tick. A leave is a
@@ -532,14 +538,15 @@ LNK_STATIC_ASSERT(sizeof(LnkEvent) == 32u, "LnkEvent must be 32 bytes: tick, pla
 LNK_STATIC_ASSERT(sizeof(LnkDerez) == 16u, "LnkDerez must be 16 bytes: tick, id, reserved.");
 LNK_STATIC_ASSERT(sizeof(LnkRefused) == 16u, "LnkRefused must be 16 bytes: tick, id, reason, reserved.");
 LNK_STATIC_ASSERT(sizeof(LnkContact) == 52u, "LnkContact must be 52 bytes: position, impulse, normal, depth, slip.");
-LNK_STATIC_ASSERT(sizeof(LnkProprioception) == 32u, "LnkProprioception must be 32 bytes: tick, id, grounded, reserved, force, count.");
+LNK_STATIC_ASSERT(sizeof(LnkProprioception) == 64u, "LnkProprioception must be 64 bytes: tick, id, grounded, reserved, force, seven servo angles, count, reserved.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkContact, position) + LNK_MEMBER_BYTES(LnkContact, impulse) + LNK_MEMBER_BYTES(LnkContact, normal)
                           + LNK_MEMBER_BYTES(LnkContact, depth) + LNK_MEMBER_BYTES(LnkContact, slip)
                       == sizeof(LnkContact),
                   "LnkContact has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkProprioception, tick) + LNK_MEMBER_BYTES(LnkProprioception, creature_id) + LNK_MEMBER_BYTES(LnkProprioception, grounded)
                           + LNK_MEMBER_BYTES(LnkProprioception, reserved0) + LNK_MEMBER_BYTES(LnkProprioception, specific_force)
-                          + LNK_MEMBER_BYTES(LnkProprioception, contact_count)
+                          + LNK_MEMBER_BYTES(LnkProprioception, joint_angles) + LNK_MEMBER_BYTES(LnkProprioception, contact_count)
+                          + LNK_MEMBER_BYTES(LnkProprioception, reserved1)
                       == sizeof(LnkProprioception),
                   "LnkProprioception has padding: a member changed width.");
 LNK_STATIC_ASSERT(sizeof(LnkProprioception) + LNK_CONTACTS_MAX * sizeof(LnkContact) <= 65535u,
