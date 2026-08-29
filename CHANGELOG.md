@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Every joint's angle back as proprioception: protocol v10.** Etape 8 movement 4 on the wire.
+  `PROPRIOCEPTION`, the owner's letter, carries `joint_angles[7]` - the angle each servo holds
+  this tick, radians, joint k between segments k and k + 1 in the sign `ACTIONS` asks in, within
+  a turn, `segment_count - 1` meaningful and the rest zero. The encoder's reading, what the joint
+  did rather than what it was asked, so a Program can close its gait on what it feels; the world
+  that holds the servos reports it, the Grid copies it into `TglSenses` (Program ABI 9), and the
+  letter stays the one channel for the body's self-report, where movement 5's servo load will
+  join it. Sixty-four bytes now: the angles, then the count, then four reserved bytes that make
+  the alignment explicit rather than leaving padding unwritten. Both ends refuse a non-finite
+  angle and a non-zero reserve by name, as they do the force.
 - **Rust 1.98.0.** The pin in `rust-toolchain.toml` moves from 1.95.0 (the Tool Updates watcher's
   #29); rustfmt, clippy, the tests and rustdoc are clean under it without a change to the code.
   The guides say 1.98.0 where they said 1.95.0.

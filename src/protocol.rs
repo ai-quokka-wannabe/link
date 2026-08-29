@@ -20,7 +20,7 @@ compile_error!("The Link protocol is little-endian on the wire; a big-endian hos
 /// `LNK_PROTOCOL_VERSION`: bumped whenever any declaration changes meaning or layout. The
 /// handshake carries the header's fingerprint rather than this number; the number exists for
 /// the human-readable refusal.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// `LNK_DEFAULT_PORT`: where Master Control listens when nobody names another port. A default
 /// and only a default. The number is the owner's: 30702, from JA-307020 — Tron's program
@@ -371,7 +371,8 @@ pub struct Contact {
 
 /// PROPRIOCEPTION, server to the one host that owns the creature - a letter, not a broadcast.
 /// Every tick after that tick's TICK_STATE: the specific force, whether the feet are on the
-/// ground, and `contact_count` [`Contact`] rows in the same frame. Thirty-two bytes.
+/// ground, the angle every servo holds, and `contact_count` [`Contact`] rows in the same
+/// frame. Sixty-four bytes.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Proprioception {
@@ -382,7 +383,16 @@ pub struct Proprioception {
     /// Always zero.
     pub reserved0: [u8; 3],
     pub specific_force: [f32; 3],
+    /// The angle each servo holds this tick, radians, joint `k` between segments `k` and
+    /// `k + 1` in the sign [`Actions::joint_targets`] asks in, within a turn;
+    /// `segment_count - 1` meaningful, the rest zero, all zero for a body of one segment.
+    /// The encoder's reading - what the joint did, not what it was asked - so a Program can
+    /// close its gait on what it feels. Finite always.
+    pub joint_angles: [f32; SEGMENTS_MAX as usize - 1],
     pub contact_count: u32,
+    /// Always zero: the four bytes that round the letter to its alignment, named so
+    /// nothing on the wire is left unwritten.
+    pub reserved1: [u8; 4],
 }
 
 /// DEREZ, server to every client: the creature leaves the world at this tick.
@@ -485,7 +495,7 @@ const _: () = assert!(size_of::<Event>() == 8 + 12 + 4 + 4 + 1 + 3 && size_of::<
 const _: () = assert!(size_of::<Derez>() == 8 + 4 + 4 && size_of::<Derez>() == 16);
 const _: () = assert!(size_of::<Refused>() == 8 + 4 + 1 + 3 && size_of::<Refused>() == 16);
 const _: () = assert!(size_of::<Contact>() == 52);
-const _: () = assert!(size_of::<Proprioception>() == 8 + 4 + 1 + 3 + 12 + 4 && size_of::<Proprioception>() == 32);
+const _: () = assert!(size_of::<Proprioception>() == 8 + 4 + 1 + 3 + 12 + 28 + 4 + 4 && size_of::<Proprioception>() == 64);
 const _: () = assert!(size_of::<Proprioception>() + CONTACTS_MAX as usize * size_of::<Contact>() <= FRAME_PAYLOAD_LIMIT);
 const _: () = assert!(size_of::<Ping>() == 8 && size_of::<Pong>() == 8);
 const _: () = assert!(size_of::<TickStateHeader>() + TICK_STATE_MAX_CREATURES as usize * size_of::<CreatureState>() <= FRAME_PAYLOAD_LIMIT);
@@ -554,7 +564,7 @@ mod tests {
         assert_eq!(Role::Spectator as u8, 1);
         assert_eq!(Role::CreatureHost as u8, 2);
         assert_eq!(EventKind::Vocalisation as u8, 1);
-        assert_eq!(PROTOCOL_VERSION, 9);
+        assert_eq!(PROTOCOL_VERSION, 10);
         assert_eq!(DEFAULT_PORT, 30_702);
     }
 
