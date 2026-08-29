@@ -94,7 +94,7 @@ When submitting:
 
 ### Prerequisites
 
-- [rustup](https://rustup.rs/) - Rust 1.95.0 is pinned by `rust-toolchain.toml` and installed on first use
+- [rustup](https://rustup.rs/) - Rust 1.98.0 is pinned by `rust-toolchain.toml` and installed on first use
 - A linker: the Visual Studio C++ workload (or Build Tools) on Windows, `build-essential` on Linux
 - Nothing else — the crate uses the standard library only, with zero third-party crates
 

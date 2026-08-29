@@ -47,7 +47,7 @@ cargo build --release
 cargo test
 ```
 
-Rust 1.95.0, pinned by `rust-toolchain.toml` and installed by [rustup](https://rustup.rs/) on first
+Rust 1.98.0, pinned by `rust-toolchain.toml` and installed by [rustup](https://rustup.rs/) on first
 use. Nothing else.
 
 ## Consuming From CMake
