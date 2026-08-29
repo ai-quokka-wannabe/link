@@ -1,7 +1,20 @@
 name: Cleanup GitHub Actions Caches
 
-# Manual trigger only - use when you want to proactively clean up
+# Runs itself. After every green "CI - Main Branch" run it prunes main's superseded cache
+# generations (a changed lock file, toolchain pin or SDK version leaves the old entry behind, and
+# CodeQL saves a fresh overlay base on every push); when a pull request closes it reclaims the
+# caches saved under that pull request's ref; and it can be dispatched by hand, with a dry run
+# that only reports. Without these triggers the workflow never ran, and superseded generations
+# lingered until GitHub's own eviction (seven days unused, or the 10 GB per-repository limit).
 on:
+    workflow_run:
+        workflows: ["CI - Main Branch"] # Prune only after a main build has refreshed the live set.
+        types: [completed]
+        branches: [main]
+
+    pull_request:
+        types: [closed] # Reclaim the caches scoped to a pull request once it is done.
+
     workflow_dispatch:
         inputs:
             dry_run:
@@ -11,19 +24,28 @@ on:
                 default: false
 
 jobs:
-    cleanup:
-        name: Cleanup Caches
+    prune-main:
+        name: Prune superseded caches on main
+        # After a green main build, or by hand. A failed build has not refreshed the live set, so
+        # pruning behind it could delete the cache the next build needs.
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
         runs-on: ubuntu-latest
+        timeout-minutes: 5
+
+        # Back-to-back main builds must not prune over each other.
+        concurrency:
+            group: cleanup-prune-main
+            cancel-in-progress: false
 
         permissions:
-            actions: write
+            actions: write # Required to delete caches.
             contents: read
 
         steps:
             - name: Checkout repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-            - name: Run cleanup script
+            - name: Prune superseded caches
               uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
               env:
                 INPUT_DRY_RUN: ${{ inputs.dry_run || false }}
@@ -31,3 +53,37 @@ jobs:
                 script: |
                     const cleanupScript = require('./.github/scripts/cleanup-caches.js');
                     await cleanupScript({ github, context, core });
+
+    reclaim-pr:
+        name: Reclaim the closed pull request's caches
+        if: github.event_name == 'pull_request'
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+
+        permissions:
+            actions: write # Required to delete caches.
+            contents: read
+
+        steps:
+            - name: Delete caches for the closed pull request
+              env:
+                GH_TOKEN: ${{ github.token }}
+                GH_REPO: ${{ github.repository }}
+                BRANCH: refs/pull/${{ github.event.pull_request.number }}/merge
+              run: |
+                  # A pull request that changes a cache key - a Dependabot lock bump, a toolchain or
+                  # SDK pin move - saves a cache scoped to its merge ref, which main can never read;
+                  # once the pull request closes that cache is dead weight. No checkout: a closed
+                  # pull request's merge ref may be gone, and the CLI needs nothing from the tree.
+                  echo "Listing caches for ${BRANCH}"
+                  ids=$(gh cache list --ref "${BRANCH}" --limit 100 --json id --jq '.[].id')
+                  if [ -z "${ids}" ]; then
+                      echo "No caches to reclaim."
+                      exit 0
+                  fi
+                  set +e # A failed delete shouldn't fail the job.
+                  for id in ${ids}; do
+                      echo "Deleting cache ${id}"
+                      gh cache delete "${id}"
+                  done
+                  echo "Done"

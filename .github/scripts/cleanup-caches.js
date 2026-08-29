@@ -1,14 +1,27 @@
 /**
  * GitHub Actions Cache Cleanup Script
  *
- * Keeps only the most recent cache per group (vulkan-sdk-windows, vulkan-sdk-linux,
- * npm-markdownlint-Linux, the CodeQL overlay-base family) and deletes all
- * older/stale caches. Caches matching no known family are never deleted,
- * only reported loudly so a new family cannot accumulate unnoticed.
+ * Prunes `refs/heads/main`: within each cache family it keeps only the most
+ * recently used entry and deletes the rest - the superseded generations that
+ * a changed lock file, toolchain pin, SDK version or CodeQL release leaves
+ * behind. Caches on any other ref are left alone here: an open pull request's
+ * cache may be newer than main's live one and must never evict it; a closed
+ * pull request's caches are reclaimed by the workflow's other job. Caches
+ * matching no known family are never deleted, only reported loudly so a new
+ * family cannot accumulate unnoticed.
+ *
+ * Families (the first segments name the family, the rest is the generation):
+ *   cargo-{OS}-{hash of toolchain + lock + manifest}
+ *   npm-{OS}-node-{version}-lock-{hash of package-lock.json}
+ *   npm-markdownlint-{OS}-node-{version}-mdlint-{version}
+ *   qt-{OS}-{version}-{kit}                      (the kit may contain a dash)
+ *   vulkan-sdk-{os}-{version}-{components hash}
+ *   codeql-overlay-base-database-{cache version}-{config hash}-{languages}-{cli version}-{sha}-{run id}-{attempt}
  */
 
 module.exports = async ({ github, context, core }) => {
     const dryRun = process.env.INPUT_DRY_RUN === "true";
+    const pruneRef = "refs/heads/main";
     const owner = context.repo.owner;
     const repo = context.repo.repo;
 
@@ -96,60 +109,87 @@ module.exports = async ({ github, context, core }) => {
         }
     }
 
+    // The family a key belongs to, or null for a key this script cannot name.
+    // Family tests use startsWith on the whole prefix because some prefixes
+    // contain dashes themselves; the more specific npm-markdownlint- test
+    // comes before the general npm- one.
+    function familyOf(key) {
+        const parts = key.split("-");
+        if (key.startsWith("cargo-")) {
+            // cargo-{OS}: one generation per toolchain + lock + manifest hash.
+            return parts.slice(0, 2).join("-");
+        }
+        if (key.startsWith("npm-markdownlint-")) {
+            // npm-markdownlint-{OS}: one generation per node + markdownlint version.
+            return parts.slice(0, 3).join("-");
+        }
+        if (key.startsWith("npm-")) {
+            // npm-{OS}: one generation per node version + package-lock.json hash.
+            return parts.slice(0, 2).join("-");
+        }
+        if (key.startsWith("qt-")) {
+            // qt-{OS}-{kit}: the version segment is the generation; the kit is
+            // everything after it, because llvm-mingw_64 contains a dash.
+            return [parts[0], parts[1], ...parts.slice(3)].join("-");
+        }
+        if (key.startsWith("vulkan-")) {
+            // vulkan-sdk-{os}: one generation per SDK version + components hash.
+            return parts.slice(0, 3).join("-");
+        }
+        if (key.startsWith("codeql-overlay-base-database-")) {
+            // CodeQL default setup saves one overlay-base database per push
+            // to main, and the key embeds the commit SHA, run ID and attempt,
+            // so no two keys ever match: grouped by full key they could never
+            // be deleted and accumulated without bound. CodeQL restores via a
+            // SHA-less prefix and only ever uses the newest match, so
+            // everything but the newest is dead weight. Group up to and
+            // including the language segment (prefix, cache version, config
+            // hash, languages) so that a second analysed language or
+            // configuration, should one ever appear, keeps its own newest
+            // base rather than evicting this one. The CLI version is
+            // deliberately excluded: keeping one cache per CodeQL release
+            // would hoard a stale entry after every upgrade, whereas losing
+            // the old version's base merely costs one full (slower, still
+            // correct) analysis.
+            return parts.slice(0, 7).join("-");
+        }
+        return null;
+    }
+
     try {
         log("=".repeat(60));
         log("GitHub Actions Cache Cleanup");
         log("=".repeat(60));
         log("");
         log(`Repository:   ${owner}/${repo}`);
+        log(`Pruning ref:  ${pruneRef}`);
         log(`Dry run:      ${dryRun}`);
         log("");
 
-        const caches = await listAllCaches();
-        stats.totalCaches = caches.length;
+        const allCaches = await listAllCaches();
+        stats.totalCaches = allCaches.length;
 
-        if (caches.length === 0) {
+        if (allCaches.length === 0) {
             log("No caches found.");
             return;
         }
 
-        log(`Found ${caches.length} cache(s).`);
+        const caches = allCaches.filter((cache) => cache.ref === pruneRef);
+        const elsewhere = allCaches.length - caches.length;
+        log(`Found ${allCaches.length} cache(s), ${caches.length} on ${pruneRef}.`);
+        if (elsewhere > 0) {
+            // A pull request's caches are its own until it closes; the reclaim
+            // job deletes them then. Listed so a leak on some other ref is seen.
+            const otherRefs = [...new Set(allCaches.filter((c) => c.ref !== pruneRef).map((c) => c.ref))];
+            log(`${elsewhere} cache(s) on other refs are left alone here: ${otherRefs.join(", ")}`);
+        }
         log("");
 
-        // Group caches by family. Family tests use startsWith on the whole
-        // prefix because some prefixes contain dashes themselves.
-        // Vulkan SDK caches: vulkan-sdk-{os}-{version}-{components hash}
-        // npm caches:        npm-markdownlint-{OS}-node-{version}-mdlint-{version}
-        // CodeQL overlay:    codeql-overlay-base-database-{cache version}-{config hash}-{languages}-{cli version}-{sha}-{run id}-{attempt}
         const cacheGroups = {};
         const unknownKeys = [];
         for (const cache of caches) {
-            let prefix;
-            if (cache.key.startsWith("vulkan-")) {
-                // Group by vulkan-sdk-{OS} (e.g., vulkan-sdk-windows, vulkan-sdk-linux)
-                const parts = cache.key.split("-");
-                prefix = `${parts[0]}-${parts[1]}-${parts[2]}`;
-            } else if (cache.key.startsWith("npm-markdownlint-")) {
-                // Group by npm-markdownlint-{OS} (e.g., npm-markdownlint-Linux)
-                const parts = cache.key.split("-");
-                prefix = `${parts[0]}-${parts[1]}-${parts[2]}`;
-            } else if (cache.key.startsWith("codeql-overlay-base-database-")) {
-                // CodeQL default setup saves one overlay-base database per push
-                // to main, and the key embeds the commit SHA, run ID and attempt,
-                // so no two keys ever match: grouped by full key they could never
-                // be deleted and accumulated without bound. CodeQL restores via a
-                // SHA-less prefix and only ever uses the newest match, so
-                // everything but the newest is dead weight. Group up to and
-                // including the language segment (prefix, cache version, config
-                // hash, languages) so that a second analysed language or
-                // configuration, should one ever appear, keeps its own newest
-                // base rather than evicting this one. The CLI version is
-                // deliberately excluded: keeping one cache per CodeQL release
-                // would hoard a stale entry after every upgrade, whereas losing
-                // the old version's base merely costs one full (slower, still
-                // correct) analysis.
-                prefix = cache.key.split("-").slice(0, 7).join("-");
-            } else {
+            let prefix = familyOf(cache.key);
+            if (prefix === null) {
                 // Deliberate fail-safe: never guess at a family this script
                 // cannot name, because a wrong grouping could delete a live,
                 // reused cache. The full key becomes the group name, so the
@@ -189,7 +229,7 @@ module.exports = async ({ github, context, core }) => {
             for (let i = 1; i < groupCaches.length; i++) {
                 const cache = groupCaches[i];
                 const daysSinceAccess = getDaysSinceAccess(cache);
-                if (await deleteCache(cache, `stale, ${daysSinceAccess}d since last access`)) {
+                if (await deleteCache(cache, `superseded, ${daysSinceAccess}d since last access`)) {
                     stats.deletedCaches++;
                 }
             }
@@ -200,6 +240,7 @@ module.exports = async ({ github, context, core }) => {
         log("Summary");
         log("=".repeat(60));
         log(`  Total caches:  ${stats.totalCaches}`);
+        log(`  On ${pruneRef}: ${caches.length}`);
         log(`  Deleted:       ${stats.deletedCaches}`);
         log(`  Kept:          ${stats.totalCaches - stats.deletedCaches}`);
         log(`  Space freed:   ${formatBytes(stats.freedBytes)}`);
