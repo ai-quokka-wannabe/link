@@ -259,6 +259,7 @@ mod tests {
                     creature_id: 7,
                     position: [1.0, 2.0, 3.0],
                     yaw: 0.5,
+                    pitch: 0.0,
                     velocity: [0.0; 3],
                     yaw_rate: 0.0,
                     vocalisation: 0.0,

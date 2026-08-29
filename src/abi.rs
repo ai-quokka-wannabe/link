@@ -1106,6 +1106,7 @@ mod tests {
                     creature_id: 0,
                     position: [0.0, 1.0, 2.0],
                     yaw: 0.1,
+                    pitch: 0.0,
                     velocity: [0.0, 0.0, 0.0],
                     yaw_rate: 0.0,
                     vocalisation: 0.0,
@@ -1116,6 +1117,7 @@ mod tests {
                     creature_id: 1,
                     position: [3.0, 4.0, 5.0],
                     yaw: 0.2,
+                    pitch: 0.0,
                     velocity: [1.0, 0.0, 0.0],
                     yaw_rate: 0.5,
                     vocalisation: 0.75,
@@ -1452,6 +1454,7 @@ mod tests {
                 creature_id: 3,
                 position: [0.0, 1.0, 2.0],
                 yaw: 0.0,
+                pitch: 0.0,
                 velocity: [0.0; 3],
                 yaw_rate: 0.0,
                 vocalisation: 0.0,
@@ -1462,6 +1465,7 @@ mod tests {
                 creature_id: 7,
                 position: [5.0, 1.0, 2.0],
                 yaw: 0.5,
+                pitch: 0.0,
                 velocity: [1.0, 0.0, 0.0],
                 yaw_rate: 0.1,
                 vocalisation: 0.9,
@@ -1807,8 +1811,9 @@ mod tests {
             reserved0: [0; 3],
             specific_force: [0.0, 9.81, 0.0],
             joint_angles: [0.0; 7],
+            joint_torques: [0.0; 7],
             contact_count: 2,
-            reserved1: [0; 4],
+            reserved1: [0; 8],
         };
 
         let client_thread = std::thread::spawn(move || {
@@ -1956,6 +1961,7 @@ mod tests {
             creature_id: 7,
             position: [1.0, 2.0, 3.0],
             yaw: 0.5,
+            pitch: 0.0,
             velocity: [0.0; 3],
             yaw_rate: 0.0,
             vocalisation: 0.0,
@@ -1975,8 +1981,9 @@ mod tests {
             reserved0: [0; 3],
             specific_force: [0.0, 9.81, 0.0],
             joint_angles: [0.0; 7],
+            joint_torques: [0.0; 7],
             contact_count: 0,
-            reserved1: [0; 4],
+            reserved1: [0; 8],
         };
         assert_eq!((table.send_proprioception)(disk, &raw const letter, std::ptr::null()), LNK_OK);
         let mut view = unsafe { std::mem::zeroed::<MessageView>() };
@@ -2039,6 +2046,7 @@ mod tests {
             creature_id: 0,
             position: [0.0; 3],
             yaw: 0.0,
+            pitch: 0.0,
             velocity: [0.0; 3],
             yaw_rate: 0.0,
             vocalisation: 0.0,

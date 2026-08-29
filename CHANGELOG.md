@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Pitch on every pose, the servo's torque in the letter: protocol v11.** Etape 8 movement 5 on
+  the wire - every segment meets the floor, the risers and the air for itself, so every pose
+  needs the one more angle a body lying over a terrace edge has. `LnkSegmentPose` and the head's
+  row carry `pitch` (about the body's right axis, positive nose up; a single body stays level at
+  zero): twenty-byte poses, a 188-byte row, refused non-finite and refused non-zero beyond the
+  chain like every other slot. `PROPRIOCEPTION` carries `joint_torques[7]` beside the angles -
+  the torque each servo holds its angle with at the tick's end, signed, at most the declared
+  maximum and exactly that when it stalls: a motor's current sense, a tendon's organ, the load a
+  joint bears, which no pose can yield. Ninety-six bytes, the tail reserve eight. Both ends
+  refuse a non-finite torque by name.
 - **Every joint's angle back as proprioception: protocol v10.** Etape 8 movement 4 on the wire.
   `PROPRIOCEPTION`, the owner's letter, carries `joint_angles[7]` - the angle each servo holds
   this tick, radians, joint k between segments k and k + 1 in the sign `ACTIONS` asks in, within
