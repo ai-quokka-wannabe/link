@@ -222,6 +222,7 @@ chore: update pinned actions
 | `SECURITY.md` | Security policy and vulnerability reporting |
 | `CHANGELOG.md` | User-facing change history |
 | `TODO.md` | Roadmap and open etapes |
+| `docs/VISION.md` | The organisation's shared vision, and the wire's part in it |
 
 ### Updating Documentation
 

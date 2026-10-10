@@ -13,8 +13,8 @@ capitalised like Master Control; `link`, lowercase, names only this repository. 
    `tron-grid-lite`, and design changes land there before code lands here. The sibling
    repositories (org `ai-quokka-wannabe`): `tron-grid-lite` — the Grid, the flagship whose
    conventions this repo mirrors; `master-control` — the world server; `rc-worm` — the first
-   Program, paused until this repo and `master-control` have solid foundations. The being is
-   **Master Control**; lower case names only its repository.
+   Program, steered today by a User at its own panel. The being is **Master Control**; lower
+   case names only its repository.
 2. **The settings are mirrored from the flagship, deliberately.** Repository settings, rulesets,
    CI shape, lint configuration and governance files are copies of `tron-grid-lite`'s, kept as
    identical as the language difference allows — the owner wants them identical, not improved.
@@ -60,9 +60,9 @@ cargo fmt --check
 cargo clippy --all-targets
 ```
 
-rustc 1.95.0 is installed on this machine via rustup. CI builds and tests on `ubuntu-latest` and
-`windows-latest`; the runners' preinstalled toolchains are updated to current stable at the start
-of every run, so a warning new to stable appears in CI at the same moment it appears locally.
+Rust 1.98.0 is pinned by `rust-toolchain.toml`, and rustup installs exactly that on first use,
+locally and in CI alike, so a warning appears in CI at the same moment it appears locally. CI
+builds and tests on `ubuntu-latest` and `windows-latest`.
 
 ## Process
 

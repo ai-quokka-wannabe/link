@@ -1,8 +1,8 @@
 # Development Environment Setup
 
 How to build and test Link - the wire of the Grid - from nothing, on Windows or Linux, exactly
-as CI does, and how a change to the wire reaches the three repositories that load it. To run the
-whole ecosystem, see the flagship's
+as CI does, and how a change to the wire reaches the other three repositories. To run the whole
+ecosystem, see the flagship's
 [RUNNING_THE_GRID.md](https://github.com/ai-quokka-wannabe/tron-grid-lite/blob/main/docs/RUNNING_THE_GRID.md).
 
 ---
