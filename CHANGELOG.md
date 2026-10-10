@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The long arc, in the open: `docs/VISION.md`.** The owner's decision (2026-10-10): the
+  organisation's whole vision goes public, in the same words in every repository and on the
+  organisation's landing page - one persistent Grid where AI creatures live and human Users enter
+  with avatars to meet them, every creature and every User on a client of their own, Master
+  Control holding the world and keeping every client in sync, a level editor for any Grid shape,
+  and minds aimed at true animal AGI, animal-level and never human-level: a multi-year arc, taken
+  in baby steps, of which the server-authoritative half stands today, on one machine. Here, after
+  the shared block, the wire's part in the arc - keeping every client in sync is already its
+  work; a host is sent every body's pose, so the senses' honesty rests on the host and on
+  TOPOLOGY.md's sense-integrity triggers, one of which a stranger's host is; what a User's own
+  client says on the wire, if anything, stays open and is TOPOLOGY.md's to rule before it is code
+  here - and what exists today. The README's § The Four Repositories points at it and speaks of
+  today's client roles, and CONTRIBUTING's table lists it. Stale lines are corrected on the way:
+  the README's protocol version (9; the header says 11) and "both consumers are C++" (Master
+  Control is Rust, and loads the built library rather than the crate); "every message flows one
+  way", in the README, where each flows its own way; the three repositories that "load" the wire,
+  in the README and the setup guide, and the pull request template's three consumers, where two
+  load it and rc-worm follows only when the Program ABI moves; TODO's eleven messages (twelve) and
+  ABI 7 (9); and `.claude/CLAUDE.md`'s paused rc-worm and Rust 1.95.0. Words only: no byte of the
+  wire moved, the client ABI did not move, and the fingerprint stands.
 - **Pitch on every pose, the servo's torque in the letter: protocol v11.** Etape 8 movement 5 on
   the wire - every segment meets the floor, the risers and the air for itself, so every pose
   needs the one more angle a body lying over a terrace edge has. `LnkSegmentPose` and the head's

@@ -17,9 +17,9 @@ Fixes #(issue number)
 
 ## The consumers
 
-The wire has three consumers - tron-grid-lite, master-control and rc-worm - and 0.0.0 keeps
-no backwards compatibility, so a change to a message, a cap or `lnk_client.h` lands with them
-or not at all.
+The wire has two consumers - tron-grid-lite and master-control - and rc-worm follows when the
+Program ABI moves with it; 0.0.0 keeps no backwards compatibility, so a change to a message, a
+cap or `lnk_client.h` lands with them or not at all.
 
 - [ ] Neither the wire nor `lnk_client.h` changed
 - [ ] They changed, and the companion pull requests in every consumer are linked above (or the

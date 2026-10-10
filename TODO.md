@@ -8,8 +8,8 @@ changes go there first.
 ## Etape 1 — the wire contract
 
 **Done.** `include/lnk/lnk_protocol.h` pins the framing (`u16 length | u8 type`, an
-exact-size rule for fixed messages, caps checked before any copy), all eleven messages as
-no-padding PODs (REZ and PROPRIOCEPTION joined later, at v4 and v5) with
+exact-size rule for fixed messages, caps checked before any copy), all twelve messages as
+no-padding PODs (REZ, PROPRIOCEPTION and REFUSED joined later, at v4, v5 and v8) with
 sum-of-members asserts, and `LNK_PROTOCOL_VERSION` guarded by `tools/check_protocol_version.py`
 in CI — the flagship's ABI discipline, wholesale. `src/protocol.rs` mirrors every struct and
 pins the same sizes, so the two languages cannot drift without one refusing to build. Broken
@@ -44,7 +44,7 @@ fingerprint comparison, a dropped partial-write carry, a forgotten partial heade
 
 ## Etape 4 — the C ABI surface
 
-**Done, both halves; ABI version 7 today.** `include/lnk/lnk_client.h` declares the surface and `src/abi.rs`
+**Done, both halves; ABI version 9 today.** `include/lnk/lnk_client.h` declares the surface and `src/abi.rs`
 implements it: one exported symbol, `lnkGetClientVTable`, returning NULL for any version but its
 own — the flagship's `tglGetProgramVTable` refusal, reproduced — with `vtable_bytes` and
 `abi_version` as the table's first members. Behind it: connect (the whole handshake, refusals

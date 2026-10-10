@@ -12,12 +12,18 @@ there is no second implementation to disagree with the first.
 link is one of four repositories in the [ai-quokka-wannabe](https://github.com/ai-quokka-wannabe)
 organisation, and it is the contract between two of them.
 [tron-grid-lite](https://github.com/ai-quokka-wannabe/tron-grid-lite) is the Grid — the renderer,
-the senses and both client roles; [master-control](https://github.com/ai-quokka-wannabe/master-control)
-is the world server the clients answer to; [rc-worm](https://github.com/ai-quokka-wannabe/rc-worm)
-is the first Program. Who owns what, and why every delegation is the way it is, lives in the
+the senses and both of today's client roles;
+[master-control](https://github.com/ai-quokka-wannabe/master-control) is the world server the
+clients answer to; [rc-worm](https://github.com/ai-quokka-wannabe/rc-worm) is the first
+Program. Who owns what, and why every delegation is the way it is, lives in the
 flagship's [docs/TOPOLOGY.md](https://github.com/ai-quokka-wannabe/tron-grid-lite/blob/main/docs/TOPOLOGY.md)
 — one table, kept in one place, pointed at from everywhere. That document is also the wire's
 design authority: design changes land there before code lands here.
+
+Where the four are headed together — one persistent Grid where AI creatures live and human Users
+enter with avatars to meet them, an aim of years taken in baby steps — is set down in
+[docs/VISION.md](docs/VISION.md): the organisation's long arc, mirrored word for word on its
+[landing page](https://github.com/ai-quokka-wannabe), and the wire's part in it.
 
 ## The Doctrine
 
@@ -26,9 +32,9 @@ design authority: design changes land there before code lands here.
   so the one component that eats hostile bytes is the organisation's one memory-safe-language
   component. `std::net` carries TCP, and the framing is hand-written plain old data.
   Rust-the-language, not Rust-the-ecosystem.
-- **A narrow C ABI.** Both consumers are C++, so the boundary is `#[repr(C)]` structs published
-  as a C header, layout-asserted on both sides and fingerprinted in the flagship's `program-abi`
-  manner.
+- **A narrow C ABI.** The Grid is C++ and Master Control loads the built library, never the
+  crate, so the boundary is `#[repr(C)]` structs published as a C header, layout-asserted on both
+  sides and fingerprinted in the flagship's `program-abi` manner.
 - **No panic crosses the boundary.** Every exported function catches unwinding at the edge and
   returns an error code — the flagship's noexcept doctrine in Rust clothing.
 - **One binary rather than one source.** Master Control, the creature host and the spectator all
@@ -37,8 +43,8 @@ design authority: design changes land there before code lands here.
 ## Building
 
 > **New here?** [docs/DEV_ENV_SETUP.md](docs/DEV_ENV_SETUP.md) builds and tests the wire from nothing
-> on Windows or Linux, exactly as CI does, and says how a change to the wire reaches the three
-> repositories that load it. The flagship's
+> on Windows or Linux, exactly as CI does, and says how a change to the wire reaches the other
+> three repositories. The flagship's
 > [RUNNING_THE_GRID.md](https://github.com/ai-quokka-wannabe/tron-grid-lite/blob/main/docs/RUNNING_THE_GRID.md)
 > stands the whole ecosystem up.
 
@@ -64,7 +70,7 @@ platforms, so it cannot rot: it is the build, not a side check.
 
 ## Where It Stands
 
-The contract is pinned at protocol version 9: `include/lnk/lnk_protocol.h` carries the framing,
+The contract is pinned at protocol version 11: `include/lnk/lnk_protocol.h` carries the framing,
 all twelve messages as no-padding PODs, and the fingerprint the handshake refuses mismatches with —
 mirrored field for field and size-asserted again in `src/protocol.rs`, guarded in CI by
 `tools/check_protocol_version.py`. The codec turns frames into messages by refusal, and the
@@ -73,7 +79,7 @@ human can read. The built library exports one symbol, `lnkGetClientVTable`
 (`include/lnk/lnk_client.h`), behind which both ends of the wire live — the connecting client
 and the listening server, localhost-only while the trust stance holds; no panic ever crosses
 it, and the default port is 30702, Tron's own designation guarding the doorway. Every message
-flows one way only, and an end speaking the other's words is hung up on. Beside the wire, the
+flows its own way only, and an end speaking the other's words is hung up on. Beside the wire, the
 Disk: a recorder whose socket is a file and a replayer that reads it back through the same
 table, so a world's life is replayed by the very code that heard it. The consumers are
 Master Control (the server half) and TronGrid Lite (both client roles). The roadmap lives in
