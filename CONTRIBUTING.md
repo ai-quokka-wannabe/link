@@ -13,6 +13,7 @@ Thank you for your interest in contributing to link! This document provides guid
 - [Coding Standards](#coding-standards)
 - [Commit Messages](#commit-messages)
 - [Documentation](#documentation)
+- [Credit and Copyright](#credit-and-copyright)
 
 ---
 
@@ -233,6 +234,27 @@ chore: update pinned actions
 - Add an entry to `CHANGELOG.md` § Unreleased for anything user-visible
 
 ---
+
+## Credit and Copyright
+
+**Every contribution is credited.** The [Contributors](README.md#contributors) section of the README lists
+everyone who has helped this repository, for any kind of contribution: code, documentation, bug reports,
+reviews, ideas, answers in Discussions. It follows the [All Contributors](https://allcontributors.org/en/reference/specification/) specification
+and is kept by hand, without a bot:
+
+- In your pull request, add a row for yourself to the table: your name linked to your GitHub profile, and
+  the emoji for what you contributed, from the [emoji key](https://allcontributors.org/en/reference/emoji-key/) (💻 code,
+  📖 documentation, 🐛 bug reports, 👀 reviews, 🤔 ideas, 💬 answering questions, ⚠️ tests).
+- Already in the table? Add the new emoji to your row.
+- Contributions that are not pull requests, such as a bug report, a review or an answered question, are added
+  by the maintainer.
+
+The credit is yours to cite, on a CV or anywhere else.
+
+**You keep your copyright.** There is no contributor licence agreement and no copyright assignment. By
+opening a pull request you license your contribution under this repository's licence, the GNU General Public
+License, version 3 or (at your option) any later version: the same terms as everything else here. What you
+write stays yours and stays open; nobody can relicense it under other terms without your consent.
 
 ## Questions?
 
