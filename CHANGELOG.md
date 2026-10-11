@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ideas, answers in Discussions - following the All Contributors specification and its emoji key, kept by
   hand. CONTRIBUTING.md gains Credit and Copyright: how to add yourself to the table, and that contributors
   keep the copyright of what they write - no contributor licence agreement, no assignment, contributions
-  licensed under GPL-3.0-or-later like everything else.
+  licensed under GPL-3.0-or-later like everything else. The copyright notices follow: every source
+  file's header and the README's licence line name The AiQuokkaWannabe Authors, not one person.
 
 - **The long arc, in the open: `docs/VISION.md`.** The owner's decision (2026-10-10): the
   organisation's whole vision goes public, in the same words in every repository and on the

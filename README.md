@@ -101,7 +101,7 @@ The emoji follow the [All Contributors emoji key](https://allcontributors.org/en
 
 ## Licence
 
-Copyright © 2026 Matej Gomboc <https://github.com/ai-quokka-wannabe/link>.
+Copyright © 2026 The AiQuokkaWannabe Authors <https://github.com/ai-quokka-wannabe/link>, listed under [Contributors](#contributors).
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by

@@ -13,7 +13,7 @@
     check below is what keeps a stale copy of THIS header from lying about the library beside
     it.
 
-    Copyright (C) 2026 Matej Gomboc <https://github.com/ai-quokka-wannabe/link>
+    Copyright (C) 2026 The AiQuokkaWannabe Authors <https://github.com/ai-quokka-wannabe/link>
 
     This program is free software: you can redistribute it and/or modify it under the terms of
     the GNU General Public License as published by the Free Software Foundation, either version
