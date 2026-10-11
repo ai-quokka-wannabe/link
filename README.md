@@ -85,6 +85,20 @@ table, so a world's life is replayed by the very code that heard it. The consume
 Master Control (the server half) and TronGrid Lite (both client roles). The roadmap lives in
 [TODO.md](TODO.md), the history in [CHANGELOG.md](CHANGELOG.md).
 
+## Contributors
+
+Everyone who helps is credited here, for any kind of contribution: code, documentation, bug reports,
+reviews, ideas, answers in Discussions. The list follows the
+[All Contributors](https://allcontributors.org/en/reference/specification/) specification and is kept by hand;
+[CONTRIBUTING.md](CONTRIBUTING.md#credit-and-copyright) says how to add yourself. Contributors keep the
+copyright of what they write.
+
+| Contributor | Contributions |
+|-------------|---------------|
+| [Matej Gomboc](https://github.com/MatejGomboc) | 💻 📖 🎨 🤔 🔬 🚇 🚧 ⚠️ |
+
+The emoji follow the [All Contributors emoji key](https://allcontributors.org/en/reference/emoji-key/).
+
 ## Licence
 
 Copyright © 2026 Matej Gomboc <https://github.com/ai-quokka-wannabe/link>.
