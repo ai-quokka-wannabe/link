@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The Long Arc has six copies.** The organisation's open research lab,
+  [iso-lab](https://github.com/ai-quokka-wannabe/iso-lab), carries the block in its own
+  `docs/VISION.md`, so the guard comment above the block in `docs/VISION.md` now says "Change all six
+  together". The block's words are unchanged.
+
 - **Every contributor credited, and their copyright kept.** README.md gains a Contributors section that
   lists everyone who helps, for any kind of contribution - code, documentation, bug reports, reviews,
   ideas, answers in Discussions - following the All Contributors specification and its emoji key, kept by

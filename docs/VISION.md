@@ -6,7 +6,7 @@ refuses what does not belong, and decides nothing about what the Grid is for. Th
 organisation's to say, and it says it below, in words mirrored across all its repositories and on
 its [landing page](https://github.com/ai-quokka-wannabe); the wire's part in the arc follows.
 
-<!-- The Long Arc: mirrored verbatim in every ai-quokka-wannabe repository (profile/README.md in .github and each docs/VISION.md). Change all five together. -->
+<!-- The Long Arc: mirrored verbatim in every ai-quokka-wannabe repository (profile/README.md in .github and each docs/VISION.md). Change all six together. -->
 
 ## The Long Arc
 
