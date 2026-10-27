@@ -1,6 +1,6 @@
-Audit the documentation for coherence: `README.md`, `CONTRIBUTING.md`, `STYLE.md`, `TODO.md`,
+Audit the documentation for coherence: `README.md`, `CONTRIBUTING.md`, `TODO.md`,
 `CHANGELOG.md`, everything under `docs/` and `.claude/CLAUDE.md`, against each other and
-against the tree as it is. Adopted from the owner's `setonix-os`.
+against the tree as it is. Link has no STYLE.md of its own; the flagship's is authoritative. Adopted from the owner's `setonix-os`.
 
 Run the numbered checks in order. Each returns exactly one of: **pass**, **finding** (quote the
 two clauses side by side, each with file and line), or **ask the maintainer** (when the tree
@@ -19,7 +19,9 @@ not exist, or exists under another name. Verify by listing, not by memory.
 
 ## 3. Facts stated in two places when one owner is named
 
-`STYLE.md` § Single Source of Truth names one file per kind of information. A second copy of
+The flagship's
+[STYLE.md § Single Source of Truth](https://github.com/ai-quokka-wannabe/tron-grid-lite/blob/main/STYLE.md#single-source-of-truth)
+names one file per kind of information. A second copy of
 such a fact is a finding, whether or not it still agrees; propose the reference
 (`FILE § Section`) that replaces the copy.
 
@@ -31,7 +33,7 @@ built; a limitation stated as current that a CHANGELOG entry lifted.
 
 ## 5. Stale "today" sections
 
-`.claude/CLAUDE.md` § CI today, `README.md` § What Lives Here Today and any paragraph shaped
+`.claude/CLAUDE.md` § Building, `README.md` § Where It Stands and any paragraph shaped
 like a handoff, against the workflows and the tree as they are now.
 
 ## 6. References lychee cannot judge

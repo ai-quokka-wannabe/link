@@ -53,7 +53,7 @@ cargo build --release
 cargo test
 ```
 
-Rust 1.98.0, pinned by `rust-toolchain.toml` and installed by [rustup](https://rustup.rs/) on first
+Rust 1.99.1, pinned by `rust-toolchain.toml` and installed by [rustup](https://rustup.rs/) on first
 use. Nothing else.
 
 ## Consuming From CMake
@@ -82,8 +82,8 @@ it, and the default port is 30702, Tron's own designation guarding the doorway. 
 flows its own way only, and an end speaking the other's words is hung up on. Beside the wire, the
 Disk: a recorder whose socket is a file and a replayer that reads it back through the same
 table, so a world's life is replayed by the very code that heard it. The consumers are
-Master Control (the server half) and TronGrid Lite (both client roles). The roadmap lives in
-[TODO.md](TODO.md), the history in [CHANGELOG.md](CHANGELOG.md).
+Master Control (the server half) and TronGrid Lite (both client roles). The etapes and what is
+open live in [TODO.md](TODO.md), the history in [CHANGELOG.md](CHANGELOG.md).
 
 ## Contributors
 
