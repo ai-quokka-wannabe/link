@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 The AiQuokkaWannabe Authors <https://github.com/ai-quokka-wannabe/link>
+#
+# This program is free software: you can redistribute it and/or modify it under the terms of
+# the GNU General Public License as published by the Free Software Foundation, either version
+# 3 of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+# without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+# See the GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along with this program.
+# If not, see <https://www.gnu.org/licenses/>.
+
 # The toolchain is pinned in exactly one place. rust-toolchain.toml names the one rustc every
 # desk and every runner builds with; the day a workflow installs a toolchain of its own - a
 # third-party action, a `rustup toolchain install`, a curl of rustup - CI has a second source of

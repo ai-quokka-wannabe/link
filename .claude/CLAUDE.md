@@ -24,8 +24,8 @@ capitalised like Master Control; `link`, lowercase, names only this repository. 
 
 ## Rules
 
-- **Language: Rust, edition 2024, stable toolchain only — and `std` only, zero third-party
-  crates.** The parser is the attack surface, which is why this component is Rust at all;
+- **Language: Rust, edition 2024, a stable release pinned exactly by `rust-toolchain.toml` — and
+  `std` only, zero third-party crates.** The parser is the attack surface, which is why this component is Rust at all;
   `std::net` carries TCP, and the framing is hand-written plain-old-data. A crate in
   `[dependencies]` is a design failure here. Rust-the-language, not Rust-the-ecosystem.
 - **Warnings are errors**, denied in `Cargo.toml` `[lints]` rather than in CI flags, so local
@@ -60,7 +60,7 @@ cargo fmt --check
 cargo clippy --all-targets
 ```
 
-Rust 1.98.0 is pinned by `rust-toolchain.toml`, and rustup installs exactly that on first use,
+Rust 1.99.1 is pinned by `rust-toolchain.toml`, and rustup installs exactly that on first use,
 locally and in CI alike, so a warning appears in CI at the same moment it appears locally. CI
 builds and tests on `ubuntu-latest` and `windows-latest`.
 

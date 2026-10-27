@@ -86,3 +86,28 @@ counted, capped, no-padding wire sections is real design, and it is designed aga
 flagship's validator as its first consumer rather than guessed here: the descriptor validation
 and `copyValidatedModel` already state what a well-formed creature is, and the wire layout must
 be exactly what they accept, or the refusal happens at the wrong end of the wire.
+
+## Etape 7 — the Disk
+
+**Done (client ABI 6, protocol unchanged at v5).** `src/recording.rs`: a recording is a
+server-held end with no peer — every `send_*` stages a frame, `flush` writes them, `close` writes
+`BYE` — fed by Master Control from the same per-subscriber loop as every citizen, so the file holds
+what was said in the wire's own bytes. `replay_open` reads it back as a client-held end whose
+`poll` yields the frames in order; its header (protocol fingerprint, world fingerprint, start
+tick, dt, start time) is judged as a handshake is, in the same words. The owner named it: a
+recording is a *Disk*, and the program that reads Disks back is *Clu*, which lives in Master
+Control.
+
+## Since the etapes
+
+The wire has since moved with its consumers' etapes rather than with etapes of its own: v6 the
+contact's face and the slide's sound, v7 the chain, v8 a refusal by name, v9 the servos (client
+ABI 9), v10 every joint's angle as proprioception, v11 pitch on every pose and the servo's torque
+in the letter. Each step is a [CHANGELOG.md](CHANGELOG.md) entry; the design behind each is the
+flagship's TOPOLOGY and Master Control's TODO.
+
+## Open
+
+Nothing on the wire is owed today. The open work is in the
+[issues](https://github.com/ai-quokka-wannabe/link/issues), and one trigger stands: the listener
+binds 127.0.0.1 only until the trust stance in the flagship's TOPOLOGY changes.

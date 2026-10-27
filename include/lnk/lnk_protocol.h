@@ -304,7 +304,7 @@ typedef struct LnkTickStateHeader {
     uint8_t reserved0[4];   /*!< Always zero. Named so the asserts can count it. */
 } LnkTickStateHeader;
 
-/*! The most creatures one TICK_STATE may carry. A cap rather than a target: v1's world is a
+/*! The most creatures one TICK_STATE may carry. A cap rather than a target: the world today is a
     dozen creatures. Since v7 a row carries its chain and since v11 every pose its pitch, so 256
     rows is 48,144 bytes of payload against the framing's 65,535 ceiling - it fits, and it is now
     the larger legal frame, a maximal REZ being 45,616; the headroom the cap once had to
