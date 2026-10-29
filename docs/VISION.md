@@ -109,10 +109,11 @@ and whether it speaks this wire at all, is open with the rest of the avatar.
 a body on the wire: its identity, its bounds, its servos and the model it is drawn with. Its
 `ACTIONS` carry the Program's intent and the angle each servo is asked to hold. And the letter,
 `PROPRIOCEPTION`, carries what that body feels (its specific force, its contacts, every joint's
-angle and load, what it swallowed and what its two amphids smell) to the one host that owns it and to nobody else, and the host copies it into its
-creature's senses. Beyond the letter, what a Program senses is not the wire's to hand out: sensor
-layouts (eyes, ears, irradiance) stay off the wire, deliberately, and the host that owns a creature
-renders its senses from the world it is sent.
+angle and load, what it swallowed and what its two amphids smell) to the one host that owns it
+and to nobody else, and the host copies it into its creature's senses. Beyond the letter, what a
+Program senses is not the wire's to hand out: sensor layouts (eyes, ears, irradiance) stay off
+the wire, deliberately, and the host that owns a creature renders its senses from the world it is
+sent.
 
 **The honest senses rest on the host, not on the wire.** The world a host is sent is the whole of
 it: every body's pose, every tick, so that it can render its own creature's senses. The promise
