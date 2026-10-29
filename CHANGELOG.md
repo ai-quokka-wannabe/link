@@ -252,6 +252,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Food on the Grid, smell in the letter: protocol v12, client ABI 10.** The owner's glowing yellow
+  orbs and a sense of smell as honest as the eyes and ears (tron-grid-lite `docs/CHEMORECEPTION.md`).
+  `TICK_STATE` carries the world's food after its creatures: `food_count` takes the four bytes
+  that were reserved, and each `LnkFoodState` row (twenty-four bytes) names the orb, its centre,
+  its radius and the fraction of it left, so the spectator draws it and the senses see its glow;
+  at most `LNK_TICK_STATE_MAX_FOOD` = 64 rows, which makes the largest legal frame 49,680 bytes,
+  still under the framing's ceiling. With two row sizes in one frame the length alone no longer
+  names the counts, so the header-time gate asks only that it be some lawful split, and the counts
+  then judge the exact sum before a row is copied. An orb eaten to nothing goes with an `EVENT` of
+  the new kind `LNK_EVENT_FOOD_GONE` (3) - the pew, sounded at its centre by the creature whose
+  bite emptied it. The letter grows from 96 bytes to 160: `intake`, what the body swallowed this
+  tick, and `odour[16]`, the bound fraction of each of eight receptor types at the left amphid and
+  then the right - what a nose measures, never a concentration, a position or a direction. Both
+  ends refuse by name a food count over the cap, a row that is not finite, a radius not above zero
+  or a quantity outside (0, 1], an intake below zero and a reading outside [0, 1]. The tick
+  view gains `foods` and `send_tick_state` a `foods` argument, so `LNK_CLIENT_ABI_VERSION` is
+  10. The world definition does not move: food density is Master Control's launch setting, not
+  part of the world's fingerprint. Companions: master-control places, depletes and smells the
+  food and sends all three; the flagship draws the orbs, renders the pew and copies the letter
+  into `TglSenses` (Program ABI 11).
+
 - **Rust 1.99.1.** The pin in `rust-toolchain.toml` moves from 1.98.0 (the Tool Updates watcher's
   #35); rustfmt, clippy, the tests and rustdoc are clean under it without a change to the code.
   The guides say 1.99.1 where they said 1.98.0, and `.claude/CLAUDE.md` says what the pin is - one

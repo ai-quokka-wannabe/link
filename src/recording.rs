@@ -268,7 +268,7 @@ mod tests {
                 header: TickStateHeader {
                     tick: 101,
                     creature_count: 1,
-                    reserved0: [0; 4],
+                    food_count: 0,
                 },
                 states: vec![CreatureState {
                     creature_id: 7,
@@ -281,6 +281,7 @@ mod tests {
                     segment_count: 1,
                     segments: [crate::protocol::SegmentPose::default(); crate::protocol::TRAILING_SEGMENTS_MAX],
                 }],
+                foods: Vec::new(),
             })
             .expect("queue");
         assert!(recorder.flush().expect("flush"));
@@ -292,7 +293,7 @@ mod tests {
         assert_eq!(replay.header().protocol_version, PROTOCOL_VERSION);
         assert!(matches!(replay.poll(), Ok(Some(Message::Welcome(_)))));
         match replay.poll() {
-            Ok(Some(Message::TickState { header, states })) => {
+            Ok(Some(Message::TickState { header, states, .. })) => {
                 assert_eq!(header.tick, 101);
                 assert_eq!(states[0].creature_id, 7);
             }

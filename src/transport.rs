@@ -941,7 +941,9 @@ mod tests {
                 joint_angles: [0.0; 7],
                 joint_torques: [0.0; 7],
                 contact_count: 0,
-                reserved1: [0; 8],
+                intake: 0.0,
+                odour: [0.0; 16],
+                reserved1: [0; 4],
             },
             contacts: Vec::new(),
         };
@@ -993,9 +995,10 @@ mod tests {
             header: crate::protocol::TickStateHeader {
                 tick: 1,
                 creature_count: 0,
-                reserved0: [0; 4],
+                food_count: 0,
             },
             states: Vec::new(),
+            foods: Vec::new(),
         };
         let event = Message::Event(crate::protocol::Event {
             tick: 1,
@@ -1116,9 +1119,10 @@ mod tests {
             header: crate::protocol::TickStateHeader {
                 tick: 1,
                 creature_count: TICK_STATE_MAX_CREATURES,
-                reserved0: [0; 4],
+                food_count: 0,
             },
             states: rows,
+            foods: Vec::new(),
         });
         let _ = server_side.flush();
 
@@ -1375,7 +1379,7 @@ mod tests {
             header: crate::protocol::TickStateHeader {
                 tick: 9,
                 creature_count: TICK_STATE_MAX_CREATURES,
-                reserved0: [0; 4],
+                food_count: 0,
             },
             states: vec![
                 crate::protocol::CreatureState {
@@ -1391,6 +1395,7 @@ mod tests {
                 };
                 TICK_STATE_MAX_CREATURES as usize
             ],
+            foods: Vec::new(),
         };
         writer.queue(&big).expect("queue");
 

@@ -31,8 +31,8 @@ use std::time::Duration;
 
 use crate::codec::Message;
 use crate::protocol::{
-    Actions, CONTACTS_MAX, Contact, CreatureState, Derez, Event, Hello, MessageType, PROTOCOL_VERSION, Ping, Pong, Proprioception, REZ_MAX_MATERIALS, REZ_MAX_TRIANGLES,
-    REZ_MAX_VERTICES, Refused, Rez, RezMaterial, RezTriangle, RezVertex, Role, TickStateHeader, Welcome, WorldDefinition, world_fingerprint,
+    Actions, CONTACTS_MAX, Contact, CreatureState, Derez, Event, FoodState, Hello, MessageType, PROTOCOL_VERSION, Ping, Pong, Proprioception, REZ_MAX_MATERIALS,
+    REZ_MAX_TRIANGLES, REZ_MAX_VERTICES, Refused, Rez, RezMaterial, RezTriangle, RezVertex, Role, TickStateHeader, Welcome, WorldDefinition, world_fingerprint,
 };
 use crate::recording::{Recorder, Replayer};
 use crate::transport::{Connection, Listener, TransportError, connect, listen, local_hello, recorded_fingerprint};
@@ -98,7 +98,7 @@ impl End {
 
 /// `LNK_CLIENT_ABI_VERSION`: bumped whenever the vtable or its rules change. The twin lives in
 /// `lnk_client.h`, and a test holds the two together.
-pub const LNK_CLIENT_ABI_VERSION: u32 = 9;
+pub const LNK_CLIENT_ABI_VERSION: u32 = 10;
 
 pub type LnkStatus = i32;
 
@@ -125,6 +125,8 @@ struct ClientInner {
     /// The rows the last TICK_STATE view borrows from. Replaced on the next TICK_STATE, freed
     /// on close — exactly the lifetime the header promises the C side.
     tick_rows: Vec<CreatureState>,
+    /// The last TICK_STATE's food rows, under the same borrow rules as its creatures.
+    tick_foods: Vec<FoodState>,
     /// The last REZ's rows, under the same borrow rules as the tick's.
     rez_vertices: Vec<RezVertex>,
     rez_triangles: Vec<RezTriangle>,
@@ -145,12 +147,15 @@ struct ServerInner {
     world_fingerprint: u64,
 }
 
-/// `LnkTickStateView`: the header by value, the rows by borrow from the private `ClientInner::tick_rows`.
+/// `LnkTickStateView`: the header by value, the rows by borrow from the private
+/// `ClientInner::tick_rows` and `ClientInner::tick_foods`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TickStateView {
     pub header: TickStateHeader,
     pub states: *const CreatureState,
+    /// `header.food_count` orbs, library-owned (client ABI 10).
+    pub foods: *const FoodState,
 }
 
 /// `LnkRezView`: the header by value, the three row arrays by borrow from the client's rez
@@ -236,7 +241,7 @@ pub struct LnkClientVTable {
         detail_capacity_bytes: u32,
     ) -> *mut LnkClient,
     pub send_welcome: extern "C" fn(connection: *mut LnkClient, welcome: *const Welcome) -> LnkStatus,
-    pub send_tick_state: extern "C" fn(connection: *mut LnkClient, header: *const TickStateHeader, states: *const CreatureState) -> LnkStatus,
+    pub send_tick_state: extern "C" fn(connection: *mut LnkClient, header: *const TickStateHeader, states: *const CreatureState, foods: *const FoodState) -> LnkStatus,
     pub send_event: extern "C" fn(connection: *mut LnkClient, event: *const Event) -> LnkStatus,
     pub send_derez: extern "C" fn(connection: *mut LnkClient, derez: *const Derez) -> LnkStatus,
     pub send_refused: extern "C" fn(connection: *mut LnkClient, refused: *const Refused) -> LnkStatus,
@@ -479,14 +484,16 @@ extern "C" fn poll_impl(client: *mut LnkClient, out_message: *mut MessageView) -
         let (message_type, payload) = match message {
             Message::Hello(hello) => (MessageType::Hello, MessageViewPayload { hello }),
             Message::Welcome(welcome) => (MessageType::Welcome, MessageViewPayload { welcome }),
-            Message::TickState { header, states } => {
+            Message::TickState { header, states, foods } => {
                 inner.tick_rows = states;
+                inner.tick_foods = foods;
                 (
                     MessageType::TickState,
                     MessageViewPayload {
                         tick_state: TickStateView {
                             header,
                             states: inner.tick_rows.as_ptr(),
+                            foods: inner.tick_foods.as_ptr(),
                         },
                     },
                 )
@@ -770,7 +777,7 @@ extern "C" fn send_welcome_impl(connection: *mut LnkClient, welcome: *const Welc
     })
 }
 
-extern "C" fn send_tick_state_impl(connection: *mut LnkClient, header: *const TickStateHeader, states: *const CreatureState) -> LnkStatus {
+extern "C" fn send_tick_state_impl(connection: *mut LnkClient, header: *const TickStateHeader, states: *const CreatureState, foods: *const FoodState) -> LnkStatus {
     guarded(LNK_PANIC, || {
         if header.is_null() {
             return LNK_BAD_ARGUMENT;
@@ -784,7 +791,10 @@ extern "C" fn send_tick_state_impl(connection: *mut LnkClient, header: *const Ti
         if header.creature_count > crate::protocol::TICK_STATE_MAX_CREATURES {
             return LNK_BAD_ARGUMENT;
         }
-        if header.creature_count > 0 && states.is_null() {
+        if header.food_count > crate::protocol::TICK_STATE_MAX_FOOD {
+            return LNK_BAD_ARGUMENT;
+        }
+        if (header.creature_count > 0 && states.is_null()) || (header.food_count > 0 && foods.is_null()) {
             return LNK_BAD_ARGUMENT;
         }
         let rows = if header.creature_count == 0 {
@@ -794,7 +804,21 @@ extern "C" fn send_tick_state_impl(connection: *mut LnkClient, header: *const Ti
             // was capped above, so at most TICK_STATE_MAX_CREATURES rows are read.
             unsafe { std::slice::from_raw_parts(states, header.creature_count as usize) }.to_vec()
         };
-        queue_on(connection, &Message::TickState { header, states: rows })
+        let orbs = if header.food_count == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: foods is non-null and the caller promised food_count rows; the count was
+            // capped above, so at most TICK_STATE_MAX_FOOD rows are read.
+            unsafe { std::slice::from_raw_parts(foods, header.food_count as usize) }.to_vec()
+        };
+        queue_on(
+            connection,
+            &Message::TickState {
+                header,
+                states: rows,
+                foods: orbs,
+            },
+        )
     })
 }
 
@@ -870,6 +894,7 @@ fn handle_for(end: End) -> *mut LnkClient {
     Box::into_raw(Box::new(ClientInner {
         end,
         tick_rows: Vec::new(),
+        tick_foods: Vec::new(),
         rez_vertices: Vec::new(),
         rez_triangles: Vec::new(),
         rez_materials: Vec::new(),
@@ -1145,9 +1170,10 @@ mod tests {
                     header: TickStateHeader {
                         tick: 100,
                         creature_count: 2,
-                        reserved0: [0; 4],
+                        food_count: 0,
                     },
                     states: rows,
+                    foods: Vec::new(),
                 })
                 .expect("queue TICK_STATE");
             assert!(connection.flush().expect("flush"));
@@ -1428,6 +1454,20 @@ mod tests {
                             assert_eq!(tick_state.header.tick, 900);
                             assert_eq!(tick_state.header.creature_count, 2);
                             assert_eq!(unsafe { (*tick_state.states.add(1)).creature_id }, 7);
+                            // The orbs ride beside the creatures, borrowed under the same rules.
+                            assert_eq!(tick_state.header.food_count, 2);
+                            let second_orb = unsafe { *tick_state.foods.add(1) };
+                            assert_eq!(second_orb.food_id, 12);
+                            assert_eq!(second_orb.position, [6.0, 0.25, -3.0]);
+                            assert_eq!(second_orb.radius, 0.25);
+                            assert_eq!(second_orb.quantity, 0.5);
+                        }
+                        if seen.len() == 2 {
+                            assert_eq!(view.message_type, MessageType::Event as u8);
+                            // SAFETY: the type byte names the union member.
+                            let event = unsafe { view.payload.event };
+                            assert_eq!(event.kind, EventKind::FoodGone as u8, "a pew crosses the ABI as its own kind");
+                            assert_eq!(event.creature_id, 7);
                         }
                     }
                     other => panic!("poll answered {other}"),
@@ -1488,18 +1528,43 @@ mod tests {
                 segments: [crate::protocol::SegmentPose::default(); crate::protocol::TRAILING_SEGMENTS_MAX],
             },
         ];
+        let foods = [
+            FoodState {
+                food_id: 11,
+                position: [-4.0, 0.25, 8.0],
+                radius: 0.25,
+                quantity: 1.0,
+            },
+            FoodState {
+                food_id: 12,
+                position: [6.0, 0.25, -3.0],
+                radius: 0.25,
+                quantity: 0.5,
+            },
+        ];
         let header = TickStateHeader {
             tick: 900,
             creature_count: 2,
-            reserved0: [0; 4],
+            food_count: 2,
         };
-        assert_eq!((table.send_tick_state)(connection, &raw const header, rows.as_ptr()), LNK_OK);
+        assert_eq!(
+            (table.send_tick_state)(connection, &raw const header, rows.as_ptr(), std::ptr::null()),
+            LNK_BAD_ARGUMENT,
+            "a food count with no rows behind it is refused before any read"
+        );
+        let rotten = [foods[0], FoodState { quantity: 0.0, ..foods[1] }];
+        assert_eq!(
+            (table.send_tick_state)(connection, &raw const header, rows.as_ptr(), rotten.as_ptr()),
+            LNK_BAD_ARGUMENT,
+            "an orb eaten to nothing is gone, not a row of zero - and nothing is staged"
+        );
+        assert_eq!((table.send_tick_state)(connection, &raw const header, rows.as_ptr(), foods.as_ptr()), LNK_OK);
         let event = Event {
             tick: 900,
-            position: [5.0, 1.0, 2.0],
-            strength: 0.9,
+            position: [6.0, 0.25, -3.0],
+            strength: 0.6,
             creature_id: 7,
-            kind: EventKind::Vocalisation as u8,
+            kind: EventKind::FoodGone as u8,
             reserved0: [0; 3],
         };
         assert_eq!((table.send_event)(connection, &raw const event), LNK_OK);
@@ -1828,7 +1893,11 @@ mod tests {
             joint_angles: [0.0; 7],
             joint_torques: [0.0; 7],
             contact_count: 2,
-            reserved1: [0; 8],
+            // A bite on this tick's pump, and both amphids smelling - every reading distinct, so
+            // a swapped slot shows across the ABI.
+            intake: 0.25,
+            odour: std::array::from_fn(|index| 0.05 * index as f32),
+            reserved1: [0; 4],
         };
 
         let client_thread = std::thread::spawn(move || {
@@ -1892,6 +1961,10 @@ mod tests {
         assert_eq!((table.send_proprioception)(connection, &raw const lying, contacts.as_ptr()), LNK_BAD_ARGUMENT);
         lying.contact_count = 1;
         assert_eq!((table.send_proprioception)(connection, &raw const lying, std::ptr::null()), LNK_BAD_ARGUMENT);
+        // A reading that is no bound fraction is refused at the sending half, and nothing staged.
+        let mut overwhelmed = letter;
+        overwhelmed.odour[9] = 1.5;
+        assert_eq!((table.send_proprioception)(connection, &raw const overwhelmed, contacts.as_ptr()), LNK_BAD_ARGUMENT);
         assert_eq!((table.send_proprioception)(connection, &raw const letter, contacts.as_ptr()), LNK_OK);
         let mut everything_left = 0u8;
         assert_eq!((table.flush)(connection, &raw mut everything_left), LNK_OK);
@@ -1986,9 +2059,9 @@ mod tests {
         let header = TickStateHeader {
             tick: 501,
             creature_count: 1,
-            reserved0: [0; 4],
+            food_count: 0,
         };
-        assert_eq!((table.send_tick_state)(disk, &raw const header, rows.as_ptr()), LNK_OK);
+        assert_eq!((table.send_tick_state)(disk, &raw const header, rows.as_ptr(), std::ptr::null()), LNK_OK);
         let letter = Proprioception {
             tick: 501,
             creature_id: 7,
@@ -1998,7 +2071,9 @@ mod tests {
             joint_angles: [0.0; 7],
             joint_torques: [0.0; 7],
             contact_count: 0,
-            reserved1: [0; 8],
+            intake: 0.0,
+            odour: [0.0; 16],
+            reserved1: [0; 4],
         };
         assert_eq!((table.send_proprioception)(disk, &raw const letter, std::ptr::null()), LNK_OK);
         let mut view = unsafe { std::mem::zeroed::<MessageView>() };
@@ -2032,7 +2107,7 @@ mod tests {
 
         // A replay has nobody to talk to.
         assert_eq!((table.send_ping)(replay, 1), LNK_BAD_ARGUMENT);
-        assert_eq!((table.send_tick_state)(replay, &raw const header, rows.as_ptr()), LNK_BAD_ARGUMENT);
+        assert_eq!((table.send_tick_state)(replay, &raw const header, rows.as_ptr(), std::ptr::null()), LNK_BAD_ARGUMENT);
 
         // What was said, in order, then the farewell, then the end.
         assert_eq!((table.poll)(replay, &raw mut view), LNK_OK);
@@ -2071,22 +2146,48 @@ mod tests {
         let over_cap = TickStateHeader {
             tick: 1,
             creature_count: TICK_STATE_MAX_CREATURES + 1,
-            reserved0: [0; 4],
+            food_count: 0,
         };
         assert_eq!(
-            (table.send_tick_state)(std::ptr::null_mut(), &raw const over_cap, one_row.as_ptr()),
+            (table.send_tick_state)(std::ptr::null_mut(), &raw const over_cap, one_row.as_ptr(), std::ptr::null()),
             LNK_BAD_ARGUMENT,
             "a count over the cap is refused before rows or connection are even looked at"
         );
         let one_claimed = TickStateHeader {
             tick: 1,
             creature_count: 1,
-            reserved0: [0; 4],
+            food_count: 0,
         };
         assert_eq!(
-            (table.send_tick_state)(std::ptr::null_mut(), &raw const one_claimed, std::ptr::null()),
+            (table.send_tick_state)(std::ptr::null_mut(), &raw const one_claimed, std::ptr::null(), std::ptr::null()),
             LNK_BAD_ARGUMENT,
             "a count with no rows behind it is refused before any read"
+        );
+        let one_orb = [FoodState {
+            food_id: 1,
+            position: [0.0; 3],
+            radius: 0.25,
+            quantity: 1.0,
+        }];
+        let larder_over_cap = TickStateHeader {
+            tick: 1,
+            creature_count: 1,
+            food_count: crate::protocol::TICK_STATE_MAX_FOOD + 1,
+        };
+        assert_eq!(
+            (table.send_tick_state)(std::ptr::null_mut(), &raw const larder_over_cap, one_row.as_ptr(), one_orb.as_ptr()),
+            LNK_BAD_ARGUMENT,
+            "a food count over the cap is refused before rows or connection are even looked at"
+        );
+        let one_orb_claimed = TickStateHeader {
+            tick: 1,
+            creature_count: 1,
+            food_count: 1,
+        };
+        assert_eq!(
+            (table.send_tick_state)(std::ptr::null_mut(), &raw const one_orb_claimed, one_row.as_ptr(), std::ptr::null()),
+            LNK_BAD_ARGUMENT,
+            "a food count with no rows behind it is refused before any read"
         );
     }
 

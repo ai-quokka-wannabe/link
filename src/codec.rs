@@ -27,14 +27,14 @@
 //! [`decode`]. The codec never panics on any input; every failure is a named [`DecodeError`].
 
 use crate::protocol::{
-    Actions, CONTACTS_MAX, Contact, CreatureState, Derez, Event, EventKind, FRAME_HEADER_BYTES, Hello, MessageType, Ping, Pong, Proprioception, REZ_MAX_MATERIALS,
-    REZ_MAX_TRIANGLES, REZ_MAX_VERTICES, RefusalReason, Refused, Rez, RezMaterial, RezTriangle, RezVertex, Role, SEGMENTS_MAX, SegmentPose, TICK_STATE_MAX_CREATURES,
-    TRAILING_SEGMENTS_MAX, TickStateHeader, Welcome,
+    Actions, CONTACTS_MAX, Contact, CreatureState, Derez, Event, EventKind, FRAME_HEADER_BYTES, FoodState, Hello, MessageType, ODOUR_READINGS, Ping, Pong,
+    Proprioception, REZ_MAX_MATERIALS, REZ_MAX_TRIANGLES, REZ_MAX_VERTICES, RefusalReason, Refused, Rez, RezMaterial, RezTriangle, RezVertex, Role, SEGMENTS_MAX,
+    SegmentPose, TICK_STATE_MAX_CREATURES, TICK_STATE_MAX_FOOD, TRAILING_SEGMENTS_MAX, TickStateHeader, Welcome,
 };
 
-/// A decoded message, owning its payload. TICK_STATE's rows live in a `Vec` sized only after
-/// the count has been validated against the cap and the length — bounded allocation, after
-/// refusal has had its chance.
+/// A decoded message, owning its payload. TICK_STATE's rows live in `Vec`s sized only after
+/// both counts have been validated against their caps and the length — bounded allocation,
+/// after refusal has had its chance.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Message {
     Hello(Hello),
@@ -48,6 +48,8 @@ pub enum Message {
     TickState {
         header: TickStateHeader,
         states: Vec<CreatureState>,
+        /// The orbs of food, after the creatures (protocol v12).
+        foods: Vec<FoodState>,
     },
     Actions(Actions),
     Event(Event),
@@ -75,18 +77,45 @@ pub enum DecodeError {
         expected: usize,
         got: usize,
     },
-    /// A TICK_STATE length that cannot be a header plus whole rows.
+    /// A TICK_STATE length that cannot be a header plus whole creature and food rows within
+    /// their caps, whatever the counts inside say.
     RaggedTickState {
         got: usize,
     },
-    /// A TICK_STATE whose row count exceeds the cap.
+    /// A TICK_STATE whose creature count exceeds the cap.
     CountOverCap {
         count: u32,
     },
-    /// A TICK_STATE whose declared count disagrees with its length.
-    CountLengthMismatch {
+    /// A TICK_STATE whose food count exceeds [`TICK_STATE_MAX_FOOD`].
+    FoodOverCap {
         count: u32,
-        rows_by_length: usize,
+    },
+    /// A TICK_STATE whose declared counts disagree with its length.
+    CountLengthMismatch {
+        creatures: u32,
+        foods: u32,
+        expected: usize,
+        got: usize,
+    },
+    /// A food row with a float that is not a real number.
+    FoodNotFinite {
+        food_id: u32,
+    },
+    /// A food row whose radius is not strictly positive.
+    FoodRadiusInvalid {
+        food_id: u32,
+    },
+    /// A food row whose quantity left is outside (0, 1]: an orb eaten to nothing is gone, not
+    /// a row of zero.
+    FoodQuantityInvalid {
+        food_id: u32,
+    },
+    /// A letter whose intake is negative: a gut swallows, it does not give back.
+    IntakeNegative,
+    /// A letter whose odour reading, at this index, is outside [0, 1] - a bound fraction, so
+    /// nothing else is a reading.
+    OdourOutOfRange {
+        index: u32,
     },
     /// A PROPRIOCEPTION length that cannot be a header plus whole contacts, or more contacts
     /// than the cap, or a count disagreeing with the length.
@@ -100,7 +129,8 @@ pub enum DecodeError {
         count: u32,
         rows_by_length: usize,
     },
-    /// A grounded byte that is neither 0 nor 1, or a force or contact that is not finite.
+    /// A grounded byte that is neither 0 nor 1, or a force, servo, intake, odour or contact
+    /// value that is not finite.
     InvalidGrounded(u8),
     ProprioceptionNotFinite,
     /// A role byte that is neither spectator nor creature host.
@@ -168,6 +198,27 @@ pub enum EncodeError {
         count: u32,
         rows: usize,
     },
+    /// The food refusals, sending side - exactly what decode refuses.
+    FoodOverCap {
+        count: usize,
+    },
+    FoodRowsMismatch {
+        count: u32,
+        rows: usize,
+    },
+    FoodNotFinite {
+        food_id: u32,
+    },
+    FoodRadiusInvalid {
+        food_id: u32,
+    },
+    FoodQuantityInvalid {
+        food_id: u32,
+    },
+    IntakeNegative,
+    OdourOutOfRange {
+        index: u32,
+    },
     InvalidRole(u8),
     InvalidEventKind(u8),
     /// A REFUSED with a reason nobody named.
@@ -220,7 +271,9 @@ pub enum EncodeError {
 pub enum PayloadRule {
     /// The length must equal this exactly.
     Exact(usize),
-    /// TICK_STATE: the length must be `header + rows * row` with `rows <= TICK_STATE_MAX_CREATURES`.
+    /// TICK_STATE: the length must be `header + creatures * row + foods * food row` for some
+    /// `creatures <= TICK_STATE_MAX_CREATURES` and `foods <= TICK_STATE_MAX_FOOD`; the counts
+    /// inside the header then judge the exact sum before any row is copied.
     TickState,
     /// REZ: at least its header, at most a maximal body; the counts inside the header then
     /// judge the exact sum before any row is copied.
@@ -246,7 +299,36 @@ fn contact_values(contact: &Contact) -> impl Iterator<Item = f32> + '_ {
 
 const TICK_HEADER_BYTES: usize = size_of::<TickStateHeader>();
 const CREATURE_STATE_BYTES: usize = size_of::<CreatureState>();
+const FOOD_STATE_BYTES: usize = size_of::<FoodState>();
 const REZ_HEADER_BYTES: usize = size_of::<Rez>();
+
+/// The largest legal TICK_STATE payload: every creature and a full larder (49,680 bytes).
+const fn max_tick_state_payload_bytes() -> usize {
+    TICK_HEADER_BYTES + TICK_STATE_MAX_CREATURES as usize * CREATURE_STATE_BYTES + TICK_STATE_MAX_FOOD as usize * FOOD_STATE_BYTES
+}
+
+/// Whether a TICK_STATE payload length can be a header plus whole creature rows and whole food
+/// rows, each within its cap - the header-time gate, answerable before a byte of payload is
+/// read. At most sixty-five trial splits, one per possible food count.
+const fn tick_state_length_fits(length: usize) -> bool {
+    if length < TICK_HEADER_BYTES || length > max_tick_state_payload_bytes() {
+        return false;
+    }
+    let rows = length - TICK_HEADER_BYTES;
+    let mut foods = 0;
+    while foods <= TICK_STATE_MAX_FOOD as usize {
+        let food_bytes = foods * FOOD_STATE_BYTES;
+        if food_bytes > rows {
+            return false;
+        }
+        let creature_bytes = rows - food_bytes;
+        if creature_bytes.is_multiple_of(CREATURE_STATE_BYTES) && creature_bytes / CREATURE_STATE_BYTES <= TICK_STATE_MAX_CREATURES as usize {
+            return true;
+        }
+        foods += 1;
+    }
+    false
+}
 
 const fn max_rez_payload_bytes() -> usize {
     REZ_HEADER_BYTES
@@ -256,11 +338,12 @@ const fn max_rez_payload_bytes() -> usize {
 }
 
 /// The most bytes any legal frame occupies on the wire, header included — a receive buffer this
-/// big can hold anything a lawful end may send. Since v11 a full TICK_STATE (48,144 bytes)
-/// outweighs a maximal REZ (45,616); from v4 to v10 it was the other way about.
+/// big can hold anything a lawful end may send. Since v11 a full TICK_STATE outweighs a maximal
+/// REZ (45,616); since v12 it is 49,680 bytes with a full larder. From v4 to v10 it was the
+/// other way about.
 #[must_use]
 pub const fn max_frame_bytes() -> usize {
-    let tick = TICK_HEADER_BYTES + TICK_STATE_MAX_CREATURES as usize * CREATURE_STATE_BYTES;
+    let tick = max_tick_state_payload_bytes();
     let rez = max_rez_payload_bytes();
     FRAME_HEADER_BYTES + if rez > tick { rez } else { tick }
 }
@@ -305,14 +388,14 @@ pub const fn check_length(rule: PayloadRule, length: usize) -> Result<(), Decode
             }
         }
         PayloadRule::TickState => {
-            if length < TICK_HEADER_BYTES || !(length - TICK_HEADER_BYTES).is_multiple_of(CREATURE_STATE_BYTES) {
-                return Err(DecodeError::RaggedTickState { got: length });
+            // Two row sizes share the frame since v12, so the length alone no longer names the
+            // counts; it must still be some lawful split, and the counts inside then judge the
+            // exact sum before a row is copied.
+            if tick_state_length_fits(length) {
+                Ok(())
+            } else {
+                Err(DecodeError::RaggedTickState { got: length })
             }
-            let rows = (length - TICK_HEADER_BYTES) / CREATURE_STATE_BYTES;
-            if rows > TICK_STATE_MAX_CREATURES as usize {
-                return Err(DecodeError::CountOverCap { count: rows as u32 });
-            }
-            Ok(())
         }
         PayloadRule::Proprioception => {
             if length < PROPRIOCEPTION_HEADER_BYTES || !(length - PROPRIOCEPTION_HEADER_BYTES).is_multiple_of(CONTACT_BYTES) {
@@ -538,9 +621,14 @@ const fn is_refusal_reason(reason: u8) -> bool {
     reason == RefusalReason::Owned as u8 || reason == RefusalReason::Full as u8 || reason == RefusalReason::Crowded as u8 || reason == RefusalReason::Bounds as u8
 }
 
+/// The kinds an EVENT may name - the enum's values, and nothing else.
+const fn is_event_kind(kind: u8) -> bool {
+    kind == EventKind::Vocalisation as u8 || kind == EventKind::Scratch as u8 || kind == EventKind::FoodGone as u8
+}
+
 fn decode_event(payload: &[u8]) -> Result<Message, DecodeError> {
     let kind = payload[28];
-    if kind != EventKind::Vocalisation as u8 && kind != EventKind::Scratch as u8 {
+    if !is_event_kind(kind) {
         return Err(DecodeError::InvalidEventKind(kind));
     }
     if payload[29..32] != [0u8; 3] {
@@ -564,7 +652,7 @@ fn decode_proprioception(payload: &[u8]) -> Result<Message, DecodeError> {
     if payload[13..16] != [0u8; 3] {
         return Err(DecodeError::ReservedNotZero);
     }
-    if payload[88..96] != [0u8; 8] {
+    if payload[156..160] != [0u8; 4] {
         return Err(DecodeError::ReservedNotZero);
     }
     let count = read_u32(payload, 84);
@@ -583,6 +671,17 @@ fn decode_proprioception(payload: &[u8]) -> Result<Message, DecodeError> {
     let joint_torques = read_f32x7(payload, 56);
     if joint_torques.iter().any(|torque| !torque.is_finite()) {
         return Err(DecodeError::ProprioceptionNotFinite);
+    }
+    let intake = read_f32(payload, 88);
+    let mut odour = [0.0f32; ODOUR_READINGS];
+    for (index, reading) in odour.iter_mut().enumerate() {
+        *reading = read_f32(payload, 92 + index * 4);
+    }
+    match judge_chemoreception(intake, &odour) {
+        Ok(()) => {}
+        Err(Chemoreception::NotFinite) => return Err(DecodeError::ProprioceptionNotFinite),
+        Err(Chemoreception::IntakeNegative) => return Err(DecodeError::IntakeNegative),
+        Err(Chemoreception::OdourOutOfRange(index)) => return Err(DecodeError::OdourOutOfRange { index }),
     }
     let mut contacts = Vec::with_capacity(rows_by_length);
     for row in 0..rows_by_length {
@@ -609,10 +708,57 @@ fn decode_proprioception(payload: &[u8]) -> Result<Message, DecodeError> {
             joint_angles,
             joint_torques,
             contact_count: count,
-            reserved1: [0; 8],
+            intake,
+            odour,
+            reserved1: [0; 4],
         },
         contacts,
     })
+}
+
+/// Why the letter's chemoreception was refused; each end turns it into its own vocabulary.
+enum Chemoreception {
+    NotFinite,
+    IntakeNegative,
+    OdourOutOfRange(u32),
+}
+
+/// The letter's chemoreception, both ways: every value finite, the intake not negative, every
+/// odour reading a bound fraction in [0, 1].
+fn judge_chemoreception(intake: f32, odour: &[f32; ODOUR_READINGS]) -> Result<(), Chemoreception> {
+    if !intake.is_finite() || odour.iter().any(|reading| !reading.is_finite()) {
+        return Err(Chemoreception::NotFinite);
+    }
+    if intake < 0.0 {
+        return Err(Chemoreception::IntakeNegative);
+    }
+    if let Some(index) = odour.iter().position(|reading| !(0.0..=1.0).contains(reading)) {
+        #[allow(clippy::cast_possible_truncation)]
+        return Err(Chemoreception::OdourOutOfRange(index as u32));
+    }
+    Ok(())
+}
+
+/// Why a food row was refused; each end turns it into its own vocabulary.
+enum FoodVerdict {
+    NotFinite,
+    RadiusInvalid,
+    QuantityInvalid,
+}
+
+/// One orb's row, both ways: every float finite, the radius strictly positive, the quantity in
+/// (0, 1] - an orb eaten to nothing is gone, with its event, not carried as a row of zero.
+fn judge_food(food: &FoodState) -> Result<(), FoodVerdict> {
+    if food.position.iter().chain([&food.radius, &food.quantity]).any(|value| !value.is_finite()) {
+        return Err(FoodVerdict::NotFinite);
+    }
+    if food.radius <= 0.0 {
+        return Err(FoodVerdict::RadiusInvalid);
+    }
+    if !(food.quantity > 0.0 && food.quantity <= 1.0) {
+        return Err(FoodVerdict::QuantityInvalid);
+    }
+    Ok(())
 }
 
 /// The spacing rule: finite always; zero for a chain of one, strictly positive otherwise.
@@ -666,16 +812,26 @@ fn judge_state(state: &CreatureState) -> Result<(), (u32, u32)> {
 
 fn decode_tick_state(payload: &[u8]) -> Result<Message, DecodeError> {
     let count = read_u32(payload, 8);
-    if payload[12..16] != [0u8; 4] {
-        return Err(DecodeError::ReservedNotZero);
+    let food_count = read_u32(payload, 12);
+    if count > TICK_STATE_MAX_CREATURES {
+        return Err(DecodeError::CountOverCap { count });
     }
-    let rows_by_length = (payload.len() - TICK_HEADER_BYTES) / CREATURE_STATE_BYTES;
-    if count as usize != rows_by_length {
-        return Err(DecodeError::CountLengthMismatch { count, rows_by_length });
+    if food_count > TICK_STATE_MAX_FOOD {
+        return Err(DecodeError::FoodOverCap { count: food_count });
+    }
+    // Both counts are capped, so the sum cannot overflow; it must equal the length exactly.
+    let expected = TICK_HEADER_BYTES + count as usize * CREATURE_STATE_BYTES + food_count as usize * FOOD_STATE_BYTES;
+    if payload.len() != expected {
+        return Err(DecodeError::CountLengthMismatch {
+            creatures: count,
+            foods: food_count,
+            expected,
+            got: payload.len(),
+        });
     }
 
-    let mut states = Vec::with_capacity(rows_by_length);
-    for row in 0..rows_by_length {
+    let mut states = Vec::with_capacity(count as usize);
+    for row in 0..count as usize {
         let at = TICK_HEADER_BYTES + row * CREATURE_STATE_BYTES;
         let mut state = CreatureState {
             creature_id: read_u32(payload, at),
@@ -711,13 +867,31 @@ fn decode_tick_state(payload: &[u8]) -> Result<Message, DecodeError> {
         }
         states.push(state);
     }
+    let mut foods = Vec::with_capacity(food_count as usize);
+    for row in 0..food_count as usize {
+        let at = TICK_HEADER_BYTES + count as usize * CREATURE_STATE_BYTES + row * FOOD_STATE_BYTES;
+        let food = FoodState {
+            food_id: read_u32(payload, at),
+            position: [read_f32(payload, at + 4), read_f32(payload, at + 8), read_f32(payload, at + 12)],
+            radius: read_f32(payload, at + 16),
+            quantity: read_f32(payload, at + 20),
+        };
+        match judge_food(&food) {
+            Ok(()) => {}
+            Err(FoodVerdict::NotFinite) => return Err(DecodeError::FoodNotFinite { food_id: food.food_id }),
+            Err(FoodVerdict::RadiusInvalid) => return Err(DecodeError::FoodRadiusInvalid { food_id: food.food_id }),
+            Err(FoodVerdict::QuantityInvalid) => return Err(DecodeError::FoodQuantityInvalid { food_id: food.food_id }),
+        }
+        foods.push(food);
+    }
     Ok(Message::TickState {
         header: TickStateHeader {
             tick: read_u64(payload, 0),
             creature_count: count,
-            reserved0: [0; 4],
+            food_count,
         },
         states,
+        foods,
     })
 }
 
@@ -838,12 +1012,18 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
                 out.extend_from_slice(&material.transmission.to_le_bytes());
             }
         }
-        Message::TickState { header, states } => {
+        Message::TickState { header, states, foods } => {
             if states.len() > TICK_STATE_MAX_CREATURES as usize {
                 return Err(EncodeError::CountOverCap { count: states.len() });
             }
-            if header.reserved0 != [0; 4] {
-                return Err(EncodeError::ReservedNotZero);
+            if foods.len() > TICK_STATE_MAX_FOOD as usize {
+                return Err(EncodeError::FoodOverCap { count: foods.len() });
+            }
+            if header.food_count as usize != foods.len() {
+                return Err(EncodeError::FoodRowsMismatch {
+                    count: header.food_count,
+                    rows: foods.len(),
+                });
             }
             if header.creature_count as usize != states.len() {
                 // A header disagreeing with its own rows is the mismatch decode refuses — named
@@ -870,10 +1050,22 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
                     }
                 }
             }
-            frame_header(out, MessageType::TickState, TICK_HEADER_BYTES + states.len() * CREATURE_STATE_BYTES);
+            for food in foods {
+                match judge_food(food) {
+                    Ok(()) => {}
+                    Err(FoodVerdict::NotFinite) => return Err(EncodeError::FoodNotFinite { food_id: food.food_id }),
+                    Err(FoodVerdict::RadiusInvalid) => return Err(EncodeError::FoodRadiusInvalid { food_id: food.food_id }),
+                    Err(FoodVerdict::QuantityInvalid) => return Err(EncodeError::FoodQuantityInvalid { food_id: food.food_id }),
+                }
+            }
+            frame_header(
+                out,
+                MessageType::TickState,
+                TICK_HEADER_BYTES + states.len() * CREATURE_STATE_BYTES + foods.len() * FOOD_STATE_BYTES,
+            );
             out.extend_from_slice(&header.tick.to_le_bytes());
             out.extend_from_slice(&header.creature_count.to_le_bytes());
-            out.extend_from_slice(&header.reserved0);
+            out.extend_from_slice(&header.food_count.to_le_bytes());
             for state in states {
                 out.extend_from_slice(&state.creature_id.to_le_bytes());
                 for axis in state.position {
@@ -894,6 +1086,14 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
                     out.extend_from_slice(&pose.yaw.to_le_bytes());
                     out.extend_from_slice(&pose.pitch.to_le_bytes());
                 }
+            }
+            for food in foods {
+                out.extend_from_slice(&food.food_id.to_le_bytes());
+                for axis in food.position {
+                    out.extend_from_slice(&axis.to_le_bytes());
+                }
+                out.extend_from_slice(&food.radius.to_le_bytes());
+                out.extend_from_slice(&food.quantity.to_le_bytes());
             }
         }
         Message::Actions(actions) => {
@@ -918,7 +1118,7 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             out.extend_from_slice(&actions.reserved0);
         }
         Message::Event(event) => {
-            if event.kind != EventKind::Vocalisation as u8 && event.kind != EventKind::Scratch as u8 {
+            if !is_event_kind(event.kind) {
                 return Err(EncodeError::InvalidEventKind(event.kind));
             }
             if event.reserved0 != [0; 3] {
@@ -947,7 +1147,7 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             if header.grounded > 1 {
                 return Err(EncodeError::InvalidGrounded(header.grounded));
             }
-            if header.reserved0 != [0; 3] || header.reserved1 != [0; 8] {
+            if header.reserved0 != [0; 3] || header.reserved1 != [0; 4] {
                 return Err(EncodeError::ReservedNotZero);
             }
             if header.specific_force.iter().any(|axis| !axis.is_finite())
@@ -956,6 +1156,12 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
                 || contacts.iter().any(|contact| contact_values(contact).any(|value| !value.is_finite()))
             {
                 return Err(EncodeError::ProprioceptionNotFinite);
+            }
+            match judge_chemoreception(header.intake, &header.odour) {
+                Ok(()) => {}
+                Err(Chemoreception::NotFinite) => return Err(EncodeError::ProprioceptionNotFinite),
+                Err(Chemoreception::IntakeNegative) => return Err(EncodeError::IntakeNegative),
+                Err(Chemoreception::OdourOutOfRange(index)) => return Err(EncodeError::OdourOutOfRange { index }),
             }
             frame_header(out, MessageType::Proprioception, PROPRIOCEPTION_HEADER_BYTES + contacts.len() * CONTACT_BYTES);
             out.extend_from_slice(&header.tick.to_le_bytes());
@@ -972,7 +1178,11 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
                 out.extend_from_slice(&torque.to_le_bytes());
             }
             out.extend_from_slice(&header.contact_count.to_le_bytes());
-            out.extend_from_slice(&[0; 8]);
+            out.extend_from_slice(&header.intake.to_le_bytes());
+            for reading in header.odour {
+                out.extend_from_slice(&reading.to_le_bytes());
+            }
+            out.extend_from_slice(&[0; 4]);
             for contact in contacts {
                 for value in contact_values(contact) {
                     out.extend_from_slice(&value.to_le_bytes());
@@ -1142,7 +1352,10 @@ mod tests {
                 joint_angles: [0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7],
                 joint_torques: [1.5, -2.5, 3.5, -4.5, 0.5, -0.25, 5.0],
                 contact_count: contacts,
-                reserved1: [0; 8],
+                intake: 0.125,
+                // Both amphids, every reading distinct, the two ends of the range among them.
+                odour: std::array::from_fn(|index| index as f32 / 15.0),
+                reserved1: [0; 4],
             },
             contacts: (0..contacts)
                 .map(|index| Contact {
@@ -1169,7 +1382,21 @@ mod tests {
         segments
     }
 
+    /// An orb: every field distinct, the quantity inside (0, 1].
+    fn orb(index: u32) -> FoodState {
+        FoodState {
+            food_id: 1_000 + index,
+            position: [index as f32 * 1.5, 0.25, -2.0 - index as f32],
+            radius: 0.25,
+            quantity: 1.0 / (1.0 + index as f32),
+        }
+    }
+
     fn sample_tick_state(rows: u32) -> Message {
+        sample_tick_state_with_food(rows, 0)
+    }
+
+    fn sample_tick_state_with_food(rows: u32, orbs: u32) -> Message {
         let states = (0..rows)
             .map(|index| CreatureState {
                 creature_id: index,
@@ -1188,9 +1415,10 @@ mod tests {
             header: TickStateHeader {
                 tick: 777,
                 creature_count: rows,
-                reserved0: [0; 4],
+                food_count: orbs,
             },
             states,
+            foods: (0..orbs).map(orb).collect(),
         }
     }
 
@@ -1213,6 +1441,9 @@ mod tests {
             sample_tick_state(0),
             sample_tick_state(3),
             sample_tick_state(TICK_STATE_MAX_CREATURES),
+            sample_tick_state_with_food(0, 2),
+            sample_tick_state_with_food(3, 5),
+            sample_tick_state_with_food(TICK_STATE_MAX_CREATURES, TICK_STATE_MAX_FOOD),
             Message::Actions(Actions {
                 tick: 42,
                 creature_id: 3,
@@ -1232,6 +1463,14 @@ mod tests {
                 strength: 0.9,
                 creature_id: 3,
                 kind: EventKind::Vocalisation as u8,
+                reserved0: [0; 3],
+            }),
+            Message::Event(Event {
+                tick: 44,
+                position: [6.0, 0.25, -3.0],
+                strength: 0.6,
+                creature_id: 3,
+                kind: EventKind::FoodGone as u8,
                 reserved0: [0; 3],
             }),
             Message::Derez(Derez {
@@ -1333,29 +1572,225 @@ mod tests {
 
     #[test]
     fn the_tick_state_length_rules_refuse_ragged_overfull_and_lying_frames() {
+        // Header-time: a length no lawful split of creature and food rows can make.
         let ragged = TICK_HEADER_BYTES + 7;
         assert_eq!(check_length(PayloadRule::TickState, ragged), Err(DecodeError::RaggedTickState { got: ragged }));
         assert_eq!(
             check_length(PayloadRule::TickState, TICK_HEADER_BYTES - 1),
             Err(DecodeError::RaggedTickState { got: TICK_HEADER_BYTES - 1 })
         );
-
-        let over = TICK_HEADER_BYTES + (TICK_STATE_MAX_CREATURES as usize + 1) * CREATURE_STATE_BYTES;
+        let past_the_largest = max_frame_bytes() - FRAME_HEADER_BYTES + 4;
         assert_eq!(
-            check_length(PayloadRule::TickState, over),
+            check_length(PayloadRule::TickState, past_the_largest),
+            Err(DecodeError::RaggedTickState { got: past_the_largest })
+        );
+        // Every lawful split passes the gate: rows alone, food alone, both, both full.
+        for (creatures, foods) in [
+            (0usize, 0usize),
+            (2, 0),
+            (0, 3),
+            (3, 5),
+            (TICK_STATE_MAX_CREATURES as usize, TICK_STATE_MAX_FOOD as usize),
+        ] {
+            let length = TICK_HEADER_BYTES + creatures * CREATURE_STATE_BYTES + foods * FOOD_STATE_BYTES;
+            assert_eq!(check_length(PayloadRule::TickState, length), Ok(()), "{creatures} creatures, {foods} orbs");
+        }
+
+        // Payload-time: a count over its cap is refused by name before the sum is judged - even
+        // in a frame whose length a lawful split could have made.
+        let frame = frame_of(&sample_tick_state(2));
+        let mut payload = frame[FRAME_HEADER_BYTES..].to_vec();
+        payload[8..12].copy_from_slice(&(TICK_STATE_MAX_CREATURES + 1).to_le_bytes());
+        assert_eq!(
+            decode(MessageType::TickState as u8, &payload),
             Err(DecodeError::CountOverCap {
                 count: TICK_STATE_MAX_CREATURES + 1
             })
         );
 
         // A frame whose length carries two rows but whose header claims three: the count lies.
-        let frame = frame_of(&sample_tick_state(2));
         let mut payload = frame[FRAME_HEADER_BYTES..].to_vec();
         payload[8..12].copy_from_slice(&3u32.to_le_bytes());
         assert_eq!(
             decode(MessageType::TickState as u8, &payload),
-            Err(DecodeError::CountLengthMismatch { count: 3, rows_by_length: 2 })
+            Err(DecodeError::CountLengthMismatch {
+                creatures: 3,
+                foods: 0,
+                expected: TICK_HEADER_BYTES + 3 * CREATURE_STATE_BYTES,
+                got: payload.len()
+            })
         );
+    }
+
+    #[test]
+    fn food_rows_are_judged_whole_and_refused_by_name_both_ways() {
+        // The counts first: a food count over the cap, then one the length does not carry.
+        let frame = frame_of(&sample_tick_state_with_food(2, 3));
+        let payload = &frame[FRAME_HEADER_BYTES..];
+        let mut over = payload.to_vec();
+        over[12..16].copy_from_slice(&(TICK_STATE_MAX_FOOD + 1).to_le_bytes());
+        assert_eq!(
+            decode(MessageType::TickState as u8, &over),
+            Err(DecodeError::FoodOverCap { count: TICK_STATE_MAX_FOOD + 1 })
+        );
+        let mut lying = payload.to_vec();
+        lying[12..16].copy_from_slice(&2u32.to_le_bytes());
+        assert_eq!(
+            decode(MessageType::TickState as u8, &lying),
+            Err(DecodeError::CountLengthMismatch {
+                creatures: 2,
+                foods: 2,
+                expected: TICK_HEADER_BYTES + 2 * CREATURE_STATE_BYTES + 2 * FOOD_STATE_BYTES,
+                got: payload.len()
+            })
+        );
+
+        // Then each row, patched one field at a time into the third orb (id 1,002): a NaN or an
+        // infinity anywhere, a radius of zero or below, a quantity of zero, above one, or not a
+        // number at all.
+        let orb_at = TICK_HEADER_BYTES + 2 * CREATURE_STATE_BYTES + 2 * FOOD_STATE_BYTES;
+        let food_id = 1_002;
+        for (offset, value, refusal) in [
+            (4usize, f32::NAN, DecodeError::FoodNotFinite { food_id }),
+            (12, f32::INFINITY, DecodeError::FoodNotFinite { food_id }),
+            (16, f32::NAN, DecodeError::FoodNotFinite { food_id }),
+            (20, f32::NEG_INFINITY, DecodeError::FoodNotFinite { food_id }),
+            (16, 0.0, DecodeError::FoodRadiusInvalid { food_id }),
+            (16, -0.25, DecodeError::FoodRadiusInvalid { food_id }),
+            (20, 0.0, DecodeError::FoodQuantityInvalid { food_id }),
+            (20, -0.5, DecodeError::FoodQuantityInvalid { food_id }),
+            (20, 1.000_001, DecodeError::FoodQuantityInvalid { food_id }),
+        ] {
+            let mut poisoned = payload.to_vec();
+            poisoned[orb_at + offset..orb_at + offset + 4].copy_from_slice(&value.to_le_bytes());
+            assert_eq!(decode(MessageType::TickState as u8, &poisoned), Err(refusal), "offset {offset} value {value}");
+        }
+        // A whole orb, a quantity of exactly one, is lawful.
+        let mut whole = payload.to_vec();
+        whole[orb_at + 20..orb_at + 24].copy_from_slice(&1.0f32.to_le_bytes());
+        assert!(decode(MessageType::TickState as u8, &whole).is_ok());
+
+        // Encode side: the same refusals before a byte is written.
+        let Message::TickState { header, states, foods } = sample_tick_state_with_food(2, 3) else {
+            unreachable!()
+        };
+        let mut out = Vec::new();
+        let larder = vec![orb(0); TICK_STATE_MAX_FOOD as usize + 1];
+        assert_eq!(
+            encode(
+                &Message::TickState {
+                    header: TickStateHeader {
+                        food_count: TICK_STATE_MAX_FOOD + 1,
+                        ..header
+                    },
+                    states: states.clone(),
+                    foods: larder
+                },
+                &mut out
+            ),
+            Err(EncodeError::FoodOverCap {
+                count: TICK_STATE_MAX_FOOD as usize + 1
+            })
+        );
+        assert_eq!(
+            encode(
+                &Message::TickState {
+                    header,
+                    states: states.clone(),
+                    foods: foods[..2].to_vec()
+                },
+                &mut out
+            ),
+            Err(EncodeError::FoodRowsMismatch { count: 3, rows: 2 })
+        );
+        for (spoil, refusal) in [
+            (
+                FoodState {
+                    position: [0.0, f32::NAN, 0.0],
+                    ..foods[2]
+                },
+                EncodeError::FoodNotFinite { food_id },
+            ),
+            (FoodState { radius: 0.0, ..foods[2] }, EncodeError::FoodRadiusInvalid { food_id }),
+            (FoodState { quantity: 0.0, ..foods[2] }, EncodeError::FoodQuantityInvalid { food_id }),
+            (FoodState { quantity: 2.0, ..foods[2] }, EncodeError::FoodQuantityInvalid { food_id }),
+        ] {
+            let mut spoiled = foods.clone();
+            spoiled[2] = spoil;
+            assert_eq!(
+                encode(
+                    &Message::TickState {
+                        header,
+                        states: states.clone(),
+                        foods: spoiled
+                    },
+                    &mut out
+                ),
+                Err(refusal)
+            );
+        }
+        assert!(out.is_empty(), "nothing is written before a refusal");
+    }
+
+    #[test]
+    fn the_letters_chemoreception_is_refused_by_name_both_ways() {
+        let frame = frame_of(&sample_proprioception(2));
+        let payload = &frame[FRAME_HEADER_BYTES..];
+        // Decode side: intake at 88, the sixteen readings from 92.
+        for (offset, value, refusal) in [
+            (88usize, -0.001f32, DecodeError::IntakeNegative),
+            (88, f32::NAN, DecodeError::ProprioceptionNotFinite),
+            (88, f32::INFINITY, DecodeError::ProprioceptionNotFinite),
+            (92, -0.01, DecodeError::OdourOutOfRange { index: 0 }),
+            (92 + 4 * 7, 1.01, DecodeError::OdourOutOfRange { index: 7 }),
+            (92 + 4 * 8, 2.0, DecodeError::OdourOutOfRange { index: 8 }),
+            (92 + 4 * 15, f32::NAN, DecodeError::ProprioceptionNotFinite),
+        ] {
+            let mut poisoned = payload.to_vec();
+            poisoned[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            assert_eq!(decode(MessageType::Proprioception as u8, &poisoned), Err(refusal), "offset {offset} value {value}");
+        }
+        // The range's own ends are readings: an empty stomach, an unbound and a saturated receptor.
+        let mut ends = payload.to_vec();
+        ends[88..92].copy_from_slice(&0.0f32.to_le_bytes());
+        ends[92..96].copy_from_slice(&0.0f32.to_le_bytes());
+        ends[92 + 4 * 15..92 + 4 * 16].copy_from_slice(&1.0f32.to_le_bytes());
+        assert!(decode(MessageType::Proprioception as u8, &ends).is_ok());
+
+        // Encode side: the same refusals before a byte is written.
+        let Message::Proprioception { header, contacts } = sample_proprioception(2) else {
+            unreachable!()
+        };
+        let mut out = Vec::new();
+        let mut hungry = header;
+        hungry.intake = -1.0;
+        let mut blind = header;
+        blind.odour[11] = -0.5;
+        let mut drowned = header;
+        drowned.odour[3] = 1.5;
+        let mut noisy = header;
+        noisy.odour[0] = f32::NAN;
+        let mut bloated = header;
+        bloated.intake = f32::INFINITY;
+        for (letter, refusal) in [
+            (hungry, EncodeError::IntakeNegative),
+            (blind, EncodeError::OdourOutOfRange { index: 11 }),
+            (drowned, EncodeError::OdourOutOfRange { index: 3 }),
+            (noisy, EncodeError::ProprioceptionNotFinite),
+            (bloated, EncodeError::ProprioceptionNotFinite),
+        ] {
+            assert_eq!(
+                encode(
+                    &Message::Proprioception {
+                        header: letter,
+                        contacts: contacts.clone()
+                    },
+                    &mut out
+                ),
+                Err(refusal)
+            );
+        }
+        assert!(out.is_empty(), "nothing is written before a refusal");
     }
 
     #[test]
@@ -1380,11 +1815,24 @@ mod tests {
         let mut payload = event[FRAME_HEADER_BYTES..].to_vec();
         payload[28] = 0;
         assert_eq!(decode(MessageType::Event as u8, &payload), Err(DecodeError::InvalidEventKind(0)));
-        // The scratch is a kind; three is not yet.
+        // The scratch is a kind, and since v12 so is the pew of food gone; four is not yet.
         payload[28] = EventKind::Scratch as u8;
         assert!(matches!(decode(MessageType::Event as u8, &payload), Ok(Message::Event(scratch)) if scratch.kind == EventKind::Scratch as u8));
-        payload[28] = 3;
-        assert_eq!(decode(MessageType::Event as u8, &payload), Err(DecodeError::InvalidEventKind(3)));
+        payload[28] = EventKind::FoodGone as u8;
+        assert!(matches!(decode(MessageType::Event as u8, &payload), Ok(Message::Event(pew)) if pew.kind == EventKind::FoodGone as u8));
+        payload[28] = 4;
+        assert_eq!(decode(MessageType::Event as u8, &payload), Err(DecodeError::InvalidEventKind(4)));
+        let mut out = Vec::new();
+        let unknown = Message::Event(Event {
+            tick: 1,
+            position: [0.0; 3],
+            strength: 0.5,
+            creature_id: 1,
+            kind: 4,
+            reserved0: [0; 3],
+        });
+        assert_eq!(encode(&unknown, &mut out), Err(EncodeError::InvalidEventKind(4)));
+        assert!(out.is_empty(), "a refused encode must write nothing");
 
         // Encode side: the same refusals, before a byte is written.
         let mut out = Vec::new();
@@ -1399,7 +1847,9 @@ mod tests {
         assert!(out.is_empty(), "a refused encode must write nothing");
 
         let overfull = sample_tick_state(TICK_STATE_MAX_CREATURES);
-        let Message::TickState { header, mut states } = overfull else { unreachable!() };
+        let Message::TickState { header, mut states, foods } = overfull else {
+            unreachable!()
+        };
         states.push(states[0]);
         let one_too_many = Message::TickState {
             header: TickStateHeader {
@@ -1407,6 +1857,7 @@ mod tests {
                 ..header
             },
             states,
+            foods,
         };
         assert_eq!(
             encode(&one_too_many, &mut out),
@@ -1418,10 +1869,11 @@ mod tests {
         // A header claiming three rows over two actual ones, both under the cap: the refusal
         // names the mismatch it is, not a cap nobody exceeded.
         let lying = sample_tick_state(2);
-        let Message::TickState { header, states } = lying else { unreachable!() };
+        let Message::TickState { header, states, .. } = lying else { unreachable!() };
         let lying_count = Message::TickState {
             header: TickStateHeader { creature_count: 3, ..header },
             states,
+            foods: Vec::new(),
         };
         assert_eq!(encode(&lying_count, &mut out), Err(EncodeError::CountRowsMismatch { count: 3, rows: 2 }));
         assert!(out.is_empty(), "a refused encode must write nothing");
@@ -1467,11 +1919,13 @@ mod tests {
     #[test]
     fn the_receive_buffer_constant_really_is_the_largest_legal_frame() {
         // The receive buffer is sized by whichever legal frame is larger. From v4 a maximal REZ
-        // (45,616 bytes) outweighed a full tick; v7's chains grew the tick to 39,952 and v11's
-        // pitch on every pose to 48,144, so since v11 the world outweighs the body. Both sit
-        // under the framing's 65,535 ceiling, and the constant follows the larger.
+        // (45,616 bytes) outweighed a full tick; v7's chains grew the tick to 39,952, v11's
+        // pitch on every pose to 48,144 and v12's full larder to 49,680, so since v11 the world
+        // outweighs the body. Both sit under the framing's 65,535 ceiling, and the constant
+        // follows the larger.
         let largest_rez = frame_of(&sample_rez(REZ_MAX_VERTICES, REZ_MAX_TRIANGLES, REZ_MAX_MATERIALS));
-        let largest_tick = frame_of(&sample_tick_state(TICK_STATE_MAX_CREATURES));
+        let largest_tick = frame_of(&sample_tick_state_with_food(TICK_STATE_MAX_CREATURES, TICK_STATE_MAX_FOOD));
+        assert_eq!(largest_tick.len(), FRAME_HEADER_BYTES + 49_680);
         assert_eq!(largest_rez.len().max(largest_tick.len()), max_frame_bytes());
         assert!(largest_tick.len() > largest_rez.len(), "since v11 a full tick outweighs a full body");
         assert!(max_frame_bytes() <= FRAME_HEADER_BYTES + FRAME_PAYLOAD_LIMIT);
@@ -1480,14 +1934,17 @@ mod tests {
     #[test]
     fn a_proprioception_is_judged_at_the_header_and_refused_by_name() {
         // Header-time: ragged, over the cap.
-        assert_eq!(check_length(PayloadRule::Proprioception, 96 + 52 * CONTACTS_MAX as usize), Ok(()));
-        assert!(matches!(check_length(PayloadRule::Proprioception, 95), Err(DecodeError::RaggedProprioception { .. })));
+        assert_eq!(check_length(PayloadRule::Proprioception, 160 + 52 * CONTACTS_MAX as usize), Ok(()));
         assert!(matches!(
-            check_length(PayloadRule::Proprioception, 96 + 51),
+            check_length(PayloadRule::Proprioception, 159),
+            Err(DecodeError::RaggedProprioception { .. })
+        ));
+        assert!(matches!(
+            check_length(PayloadRule::Proprioception, 160 + 51),
             Err(DecodeError::RaggedProprioception { .. })
         ));
         assert_eq!(
-            check_length(PayloadRule::Proprioception, 96 + 52 * (CONTACTS_MAX as usize + 1)),
+            check_length(PayloadRule::Proprioception, 160 + 52 * (CONTACTS_MAX as usize + 1)),
             Err(DecodeError::ContactsOverCap { count: CONTACTS_MAX + 1 })
         );
 
@@ -1508,9 +1965,9 @@ mod tests {
         reserved[14] = 1;
         assert_eq!(decode(MessageType::Proprioception as u8, &reserved), Err(DecodeError::ReservedNotZero));
         let mut tail = payload.to_vec();
-        tail[93] = 1;
+        tail[157] = 1;
         assert_eq!(decode(MessageType::Proprioception as u8, &tail), Err(DecodeError::ReservedNotZero));
-        for offset in [16usize, 28 + 4 * 3, 56 + 4 * 6, 96 + 4, 96 + 52 + 44] {
+        for offset in [16usize, 28 + 4 * 3, 56 + 4 * 6, 160 + 4, 160 + 52 + 44] {
             let mut poisoned = payload.to_vec();
             poisoned[offset..offset + 4].copy_from_slice(&f32::NAN.to_le_bytes());
             assert_eq!(
@@ -1599,7 +2056,7 @@ mod tests {
             Err(EncodeError::ProprioceptionNotFinite)
         );
         let mut tail = header;
-        tail.reserved1 = [0, 0, 1, 0, 0, 0, 0, 0];
+        tail.reserved1 = [0, 0, 1, 0];
         assert_eq!(
             encode(&Message::Proprioception { header: tail, contacts }, &mut out),
             Err(EncodeError::ReservedNotZero)
@@ -1788,7 +2245,7 @@ mod tests {
 
         // A TICK_STATE row: no segments, too many, a NaN in a trailing pose, a slot beyond the
         // chain that is not zero.
-        let Message::TickState { header, states } = sample_tick_state(1) else {
+        let Message::TickState { header, states, .. } = sample_tick_state(1) else {
             unreachable!()
         };
         let honest = states[0];
@@ -1833,7 +2290,11 @@ mod tests {
             (poisoned, EncodeError::TickStateNotFinite { creature_id: 0 }),
             (dirty, EncodeError::SegmentSlotNotZero { creature_id: 0 }),
         ] {
-            let lying = Message::TickState { header, states: vec![row] };
+            let lying = Message::TickState {
+                header,
+                states: vec![row],
+                foods: Vec::new(),
+            };
             let mut out = Vec::new();
             assert_eq!(encode(&lying, &mut out), Err(refusal));
             assert!(out.is_empty(), "nothing is written before a refusal");
@@ -1846,6 +2307,7 @@ mod tests {
                 segments: chain(2),
                 ..honest
             }],
+            foods: Vec::new(),
         });
         let row_at = FRAME_HEADER_BYTES + TICK_HEADER_BYTES;
         let mut over = honest_frame.clone();
