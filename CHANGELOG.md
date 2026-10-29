@@ -416,6 +416,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The linter's math renderer is the patched one.** markdownlint reaches KaTeX through
+  `micromark-extension-math`, whose `^0.16` range cannot reach the prototype-pollution fix in 0.18.2
+  (Dependabot #7), so `package.json` overrides it to 0.18.2. The linter loads it and passes as before.
 - **Every code file carries its notice.** The credit entry under Added said every source file's header
   names The AiQuokkaWannabe Authors; only the two C headers had one. The six Rust sources, the CMake
   face, `tools/check_protocol_version.py` and the two CI scripts now open with the GPL-3.0-or-later
