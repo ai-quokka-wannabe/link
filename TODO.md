@@ -44,7 +44,7 @@ fingerprint comparison, a dropped partial-write carry, a forgotten partial heade
 
 ## Etape 4 — the C ABI surface
 
-**Done, both halves; ABI version 9 today.** `include/lnk/lnk_client.h` declares the surface and `src/abi.rs`
+**Done, both halves; ABI version 10 today.** `include/lnk/lnk_client.h` declares the surface and `src/abi.rs`
 implements it: one exported symbol, `lnkGetClientVTable`, returning NULL for any version but its
 own — the flagship's `tglGetProgramVTable` refusal, reproduced — with `vtable_bytes` and
 `abi_version` as the table's first members. Behind it: connect (the whole handshake, refusals
@@ -103,8 +103,9 @@ Control.
 The wire has since moved with its consumers' etapes rather than with etapes of its own: v6 the
 contact's face and the slide's sound, v7 the chain, v8 a refusal by name, v9 the servos (client
 ABI 9), v10 every joint's angle as proprioception, v11 pitch on every pose and the servo's torque
-in the letter. Each step is a [CHANGELOG.md](CHANGELOG.md) entry; the design behind each is the
-flagship's TOPOLOGY and Master Control's TODO.
+in the letter, v12 food on the Grid - its rows in the tick, its going as an event - and intake and
+smell in the letter (client ABI 10). Each step is a [CHANGELOG.md](CHANGELOG.md) entry; the design
+behind each is the flagship's TOPOLOGY (for v12 its CHEMORECEPTION) and Master Control's TODO.
 
 ## Open
 

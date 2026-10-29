@@ -35,7 +35,7 @@ compile_error!("The Link protocol is little-endian on the wire; a big-endian hos
 /// `LNK_PROTOCOL_VERSION`: bumped whenever any declaration changes meaning or layout. The
 /// handshake carries the header's fingerprint rather than this number; the number exists for
 /// the human-readable refusal.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// `LNK_DEFAULT_PORT`: where Master Control listens when nobody names another port. A default
 /// and only a default. The number is the owner's: 30702, from JA-307020 — Tron's program
@@ -69,9 +69,24 @@ pub const FRAME_HEADER_BYTES: usize = 3;
 /// The framing's own ceiling: length is a `u16`, so no payload can exceed this.
 pub const FRAME_PAYLOAD_LIMIT: usize = 65_535;
 
-/// The most creatures one TICK_STATE may carry. A cap rather than a target — 256 rows is
-/// 10,256 bytes against the framing's 65,535 ceiling.
+/// The most creatures one TICK_STATE may carry. A cap rather than a target — 256 rows of 188
+/// bytes are 48,128; with the header and a full larder of food the largest legal TICK_STATE is
+/// 49,680 bytes against the framing's 65,535 ceiling.
 pub const TICK_STATE_MAX_CREATURES: u32 = 256;
+
+/// `LNK_TICK_STATE_MAX_FOOD`: the most orbs of food one TICK_STATE may carry (protocol v12).
+/// Sixty-four rows of twenty-four bytes are 1,536.
+pub const TICK_STATE_MAX_FOOD: u32 = 64;
+
+/// `LNK_ODOUR_RECEPTORS`: receptor types per amphid. An odour is a pattern of activity across a
+/// few types, not a name (tron-grid-lite docs/CHEMORECEPTION.md).
+pub const ODOUR_RECEPTORS: u32 = 8;
+
+/// `LNK_AMPHIDS`: the paired sense organs at the nose - left (index 0), then right (index 1).
+pub const AMPHIDS: u32 = 2;
+
+/// Every odour reading the letter carries: both amphids' receptors, left amphid first.
+pub const ODOUR_READINGS: usize = (AMPHIDS * ODOUR_RECEPTORS) as usize;
 
 /// Message types as they appear in the frame header's third byte. Zero is invalid,
 /// deliberately: a zeroed buffer read as a message refuses loudly instead of meaning something.
@@ -115,6 +130,9 @@ pub enum EventKind {
     Vocalisation = 1,
     /// A body sliding along a face: footsteps, a scrape along a wall, a brush past another.
     Scratch = 2,
+    /// An orb of food eaten to nothing, gone with a pew sounded at its centre: `creature_id` the
+    /// creature whose last bite emptied it, `strength` the pew's loudness, (0, 1] (protocol v12).
+    FoodGone = 3,
 }
 
 /// `LnkWorldDefinition`: the shared simulation truth, gathered so it can be fingerprinted -
@@ -259,8 +277,8 @@ pub const REZ_MAX_MATERIALS: u32 = 16;
 /// The most segments one creature's chain may have, the head counted: a chain is the head -
 /// today's rigid body - and up to seven trailing segments the world places along the head's
 /// recorded path (protocol v7; TOPOLOGY.md § The chain). Eight is a worm of eight icosahedra,
-/// and eight rows of twenty bytes make a full TICK_STATE 48,144 bytes - since v11 the larger
-/// legal frame, and comfortably under the framing's ceiling.
+/// and with every pose twenty bytes and, since v12, a full larder of food rows, a full
+/// TICK_STATE is 49,680 bytes - the larger legal frame, comfortably under the framing's ceiling.
 pub const SEGMENTS_MAX: u32 = 8;
 /// The trailing segments a [`CreatureState`] row carries: every segment but the head.
 pub const TRAILING_SEGMENTS_MAX: usize = (SEGMENTS_MAX - 1) as usize;
@@ -308,18 +326,37 @@ pub struct CreatureState {
     pub segments: [SegmentPose; TRAILING_SEGMENTS_MAX],
 }
 
+/// One orb of food, as the world holds it this tick (protocol v12): placed by Master Control,
+/// depleted by the mouths, drawn by the spectator and seen by the senses as a glow. Every float
+/// finite, the radius positive, the quantity in (0, 1], or the row is refused. Twenty-four bytes.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct FoodState {
+    /// Stable for the orb's life; never reused within a world.
+    pub food_id: u32,
+    /// Metres, world space: the orb's centre.
+    pub position: [f32; 3],
+    /// Metres, strictly positive and finite.
+    pub radius: f32,
+    /// Fraction of the orb left, (0, 1], finite; its glow scales with it.
+    pub quantity: f32,
+}
+
 /// TICK_STATE, server to every client, every tick: the whole settled world, no deltas, no acks.
 /// The payload is this header followed immediately by `creature_count` [`CreatureState`] rows,
-/// and the frame length must equal `size_of::<TickStateHeader>() + creature_count * size_of::<CreatureState>()`
-/// with `creature_count <= TICK_STATE_MAX_CREATURES` — both checked before any copy.
+/// then `food_count` [`FoodState`] rows, and the frame length must equal
+/// `size_of::<TickStateHeader>() + creature_count * size_of::<CreatureState>() + food_count * size_of::<FoodState>()`
+/// with `creature_count <= TICK_STATE_MAX_CREATURES` and `food_count <= TICK_STATE_MAX_FOOD` —
+/// all checked before any copy.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct TickStateHeader {
     /// The tick these rows are the settled truth of.
     pub tick: u64,
     pub creature_count: u32,
-    /// Always zero.
-    pub reserved0: [u8; 4],
+    /// [`FoodState`] rows after the creatures, at most [`TICK_STATE_MAX_FOOD`]. Since v12 it
+    /// holds the four bytes that were reserved.
+    pub food_count: u32,
 }
 
 /// ACTIONS, creature host to server: the Program's staged intent for a future tick — the twelve
@@ -394,7 +431,8 @@ pub struct Contact {
 /// PROPRIOCEPTION, server to the one host that owns the creature - a letter, not a broadcast.
 /// Every tick after that tick's TICK_STATE: the specific force, whether the feet are on the
 /// ground, the angle every servo holds and the torque it holds it with, and `contact_count`
-/// [`Contact`] rows in the same frame. Ninety-six bytes.
+/// [`Contact`] rows in the same frame; since v12 also what the body swallowed and what its two
+/// amphids smell. One hundred and sixty bytes.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Proprioception {
@@ -417,9 +455,15 @@ pub struct Proprioception {
     /// the joint bears, which no pose can yield. Same slots as the angles. Finite always.
     pub joint_torques: [f32; SEGMENTS_MAX as usize - 1],
     pub contact_count: u32,
-    /// Always zero: the eight bytes that round the letter to its alignment, named so
+    /// What the body swallowed this tick, in the world's food unit: zero on most ticks, one
+    /// bite on a pump. Interoception. Non-negative and finite, or refused.
+    pub intake: f32,
+    /// Bound fraction per receptor type, `[0, 1]`, finite: left amphid `0..8`, right `8..16`.
+    /// What a nose measures - never a concentration, a position or a direction.
+    pub odour: [f32; ODOUR_READINGS],
+    /// Always zero: the four bytes that round the letter to its alignment, named so
     /// nothing on the wire is left unwritten.
-    pub reserved1: [u8; 8],
+    pub reserved1: [u8; 4],
 }
 
 /// DEREZ, server to every client: the creature leaves the world at this tick.
@@ -517,15 +561,19 @@ const _: () = assert!(
 );
 const _: () = assert!(size_of::<CreatureState>() == 4 + 12 + 4 + 4 + 12 + 4 + 4 + 4 + TRAILING_SEGMENTS_MAX * 20 && size_of::<CreatureState>() == 188);
 const _: () = assert!(size_of::<TickStateHeader>() == 8 + 4 + 4 && size_of::<TickStateHeader>() == 16);
+const _: () = assert!(size_of::<FoodState>() == 4 + 12 + 4 + 4 && size_of::<FoodState>() == 24);
 const _: () = assert!(size_of::<Actions>() == 8 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 7 * 4 + 7 * 4 + 4 && size_of::<Actions>() == 96);
 const _: () = assert!(size_of::<Event>() == 8 + 12 + 4 + 4 + 1 + 3 && size_of::<Event>() == 32);
 const _: () = assert!(size_of::<Derez>() == 8 + 4 + 4 && size_of::<Derez>() == 16);
 const _: () = assert!(size_of::<Refused>() == 8 + 4 + 1 + 3 && size_of::<Refused>() == 16);
 const _: () = assert!(size_of::<Contact>() == 52);
-const _: () = assert!(size_of::<Proprioception>() == 8 + 4 + 1 + 3 + 12 + 28 + 28 + 4 + 8 && size_of::<Proprioception>() == 96);
+const _: () = assert!(size_of::<Proprioception>() == 8 + 4 + 1 + 3 + 12 + 28 + 28 + 4 + 4 + ODOUR_READINGS * 4 + 4 && size_of::<Proprioception>() == 160);
 const _: () = assert!(size_of::<Proprioception>() + CONTACTS_MAX as usize * size_of::<Contact>() <= FRAME_PAYLOAD_LIMIT);
 const _: () = assert!(size_of::<Ping>() == 8 && size_of::<Pong>() == 8);
-const _: () = assert!(size_of::<TickStateHeader>() + TICK_STATE_MAX_CREATURES as usize * size_of::<CreatureState>() <= FRAME_PAYLOAD_LIMIT);
+const _: () = assert!(
+    size_of::<TickStateHeader>() + TICK_STATE_MAX_CREATURES as usize * size_of::<CreatureState>() + TICK_STATE_MAX_FOOD as usize * size_of::<FoodState>()
+        <= FRAME_PAYLOAD_LIMIT
+);
 
 #[cfg(test)]
 mod tests {
@@ -566,13 +614,14 @@ mod tests {
 
     #[test]
     fn a_full_tick_state_fits_one_frame_and_since_v11_outweighs_a_maximal_rez() {
-        // Since v7 a row carries its chain and since v11 every pose its pitch, so a full tick is
-        // 48,144 bytes rather than v6's 10,256: it fits one frame, and it is now the frame the
-        // receive buffer is sized by - a maximal REZ (45,616) no longer outweighs it. The
-        // headroom the cap once had to quadruple is spent; the framing is now exactly as
-        // interesting as TOPOLOGY.md's delta-compression trigger says it may become.
-        let full = size_of::<TickStateHeader>() + TICK_STATE_MAX_CREATURES as usize * size_of::<CreatureState>();
-        assert_eq!(full, 48_144);
+        // Since v7 a row carries its chain, since v11 every pose its pitch, and since v12 a full
+        // larder rides beside the creatures, so a full tick is 49,680 bytes rather than v6's
+        // 10,256: it fits one frame, and it is the frame the receive buffer is sized by - a
+        // maximal REZ (45,616) no longer outweighs it. The headroom the cap once had to
+        // quadruple is spent; the framing is now exactly as interesting as TOPOLOGY.md's
+        // delta-compression trigger says it may become.
+        let full = size_of::<TickStateHeader>() + TICK_STATE_MAX_CREATURES as usize * size_of::<CreatureState>() + TICK_STATE_MAX_FOOD as usize * size_of::<FoodState>();
+        assert_eq!(full, 49_680);
         assert!(full <= FRAME_PAYLOAD_LIMIT);
         let rez = size_of::<Rez>()
             + REZ_MAX_VERTICES as usize * size_of::<RezVertex>()
@@ -593,7 +642,9 @@ mod tests {
         assert_eq!(Role::Spectator as u8, 1);
         assert_eq!(Role::CreatureHost as u8, 2);
         assert_eq!(EventKind::Vocalisation as u8, 1);
-        assert_eq!(PROTOCOL_VERSION, 11);
+        assert_eq!(EventKind::Scratch as u8, 2);
+        assert_eq!(EventKind::FoodGone as u8, 3);
+        assert_eq!(PROTOCOL_VERSION, 12);
         assert_eq!(DEFAULT_PORT, 30_702);
     }
 
@@ -632,6 +683,27 @@ mod tests {
             "LNK_REZ_MAX_MATERIALS drifted"
         );
         assert!(header.contains(&format!("#define LNK_SEGMENTS_MAX {SEGMENTS_MAX}u")), "LNK_SEGMENTS_MAX drifted");
+        assert!(
+            header.contains(&format!("#define LNK_TICK_STATE_MAX_CREATURES {TICK_STATE_MAX_CREATURES}u")),
+            "LNK_TICK_STATE_MAX_CREATURES drifted"
+        );
+        assert!(
+            header.contains(&format!("#define LNK_TICK_STATE_MAX_FOOD {TICK_STATE_MAX_FOOD}u")),
+            "LNK_TICK_STATE_MAX_FOOD drifted"
+        );
+        assert!(
+            header.contains(&format!("#define LNK_ODOUR_RECEPTORS {ODOUR_RECEPTORS}u")),
+            "LNK_ODOUR_RECEPTORS drifted"
+        );
+        assert!(header.contains(&format!("#define LNK_AMPHIDS {AMPHIDS}u")), "LNK_AMPHIDS drifted");
+        assert!(header.contains(&format!("#define LNK_CONTACTS_MAX {CONTACTS_MAX}u")), "LNK_CONTACTS_MAX drifted");
+        for (name, kind) in [
+            ("LNK_EVENT_VOCALISATION", EventKind::Vocalisation),
+            ("LNK_EVENT_SCRATCH", EventKind::Scratch),
+            ("LNK_EVENT_FOOD_GONE", EventKind::FoodGone),
+        ] {
+            assert!(header.contains(&format!("#define {name} {}u", kind as u8)), "{name} drifted");
+        }
     }
 
     #[test]
@@ -659,6 +731,16 @@ mod tests {
         let mut other_dt = definition;
         other_dt.dt_seconds = 0.02;
         assert_ne!(world_fingerprint(&other_dt), fingerprint, "a bent dt is a different world too");
+    }
+
+    #[test]
+    fn the_letter_carries_intake_and_two_amphids_of_eight_receptors() {
+        // v12: the letter grows from 96 to 160 bytes - intake, sixteen bound fractions, and a
+        // four-byte reserve that rounds it to its alignment.
+        assert_eq!(size_of::<Proprioception>(), 160);
+        assert_eq!(ODOUR_READINGS, 16);
+        assert_eq!(size_of::<FoodState>(), 24);
+        assert!(size_of::<Proprioception>() + CONTACTS_MAX as usize * size_of::<Contact>() <= FRAME_PAYLOAD_LIMIT);
     }
 
     #[test]

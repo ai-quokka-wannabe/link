@@ -49,7 +49,7 @@ extern "C"
     carries the header's fingerprint rather than this number, so two ends disagreeing about the
     bytes are refused even when they agree about the number; the number exists for the
     human-readable refusal. */
-#define LNK_PROTOCOL_VERSION 11u
+#define LNK_PROTOCOL_VERSION 12u
 
 /*! The port Master Control listens on when nobody names another - a default and only a
     default: the client's positional argument carries any host and port, and Master Control
@@ -138,6 +138,13 @@ extern "C"
     sounded from the contact point, its strength the slip against the normal impulse (the
     exact-contacts ruling, TOPOLOGY.md § Master Control's mechanics). Footsteps are scratches. */
 #define LNK_EVENT_SCRATCH 2u
+/*! An orb of food eaten to nothing is gone, and it goes with a sound - the owner's "pew", a
+    short falling chirp sounded at the orb as a call is (tron-grid-lite docs/CHEMORECEPTION.md):
+    creature_id is the creature whose last bite emptied it, position the orb's centre, strength
+    the pew's loudness on the vocalisation's actuator-like scale, (0, 1]. A real source in the
+    world: the spectator's speakers and every creature's ears render it by the same acoustics,
+    so a body nearby hears that food was eaten, and nothing more (protocol v12). */
+#define LNK_EVENT_FOOD_GONE 3u
 
 /*!
     The shared simulation truth, gathered so it can be fingerprinted: the floor the physics
@@ -264,8 +271,9 @@ typedef struct LnkRezMaterial {
     the head - the one rigid body physics steps - and up to seven trailing segments the world
     places along the head's recorded path, every one wearing the REZ's model; the joint between
     two segments is authored into the model itself, so the wire carries poses and nothing else.
-    Eight is a worm of eight icosahedra, and eight rows of twenty bytes make a full TICK_STATE
-    48,144 bytes - since v11 the larger legal frame, comfortably under the framing's ceiling. */
+    Eight is a worm of eight icosahedra; with every pose twenty bytes and, since v12, a full
+    larder of food rows, a full TICK_STATE is 49,680 bytes - the larger legal frame, comfortably
+    under the framing's ceiling. */
 #define LNK_SEGMENTS_MAX 8u
 
 /*! One trailing segment's pose: where it is and which way it faces, world space, the head's
@@ -294,22 +302,50 @@ typedef struct LnkCreatureState {
     LnkSegmentPose segments[LNK_SEGMENTS_MAX - 1u]; /*!< The trailing segments' poses, segment_count - 1 meaningful, the rest zero. */
 } LnkCreatureState;
 
+/*! One orb of food, as the world holds it this tick (protocol v12; tron-grid-lite
+    docs/CHEMORECEPTION.md). Master Control places it, the mouths deplete it, and it is gone with
+    an LNK_EVENT_FOOD_GONE; the row exists so the spectator draws the orb and the creature host's
+    senses see its glow - nothing a brain is handed, since a sense hands a Program only what a
+    real body's receptors would measure. Every float finite, the radius positive, the quantity in
+    (0, 1], or the row is refused. Twenty-four bytes. */
+typedef struct LnkFoodState {
+    uint32_t food_id;     /*!< Stable for the orb's life; never reused within a world. */
+    float position[3];    /*!< Metres, world space: the orb's centre. */
+    float radius;         /*!< Metres, > 0, finite. */
+    float quantity;       /*!< Fraction of the orb left, (0, 1], finite; its glow scales with it. */
+} LnkFoodState;
+
 /*! TICK_STATE, server to every client, every tick: the whole settled world, no deltas, no acks.
-    The payload is this header followed immediately by creature_count LnkCreatureState rows, and
-    the frame length must equal sizeof(LnkTickStateHeader) + creature_count * sizeof(LnkCreatureState)
-    with creature_count <= LNK_TICK_STATE_MAX_CREATURES - both checked before any copy. */
+    The payload is this header followed immediately by creature_count LnkCreatureState rows, then
+    food_count LnkFoodState rows, and the frame length must equal sizeof(LnkTickStateHeader)
+    + creature_count * sizeof(LnkCreatureState) + food_count * sizeof(LnkFoodState), with
+    creature_count <= LNK_TICK_STATE_MAX_CREATURES and food_count <= LNK_TICK_STATE_MAX_FOOD -
+    all checked before any copy. Since v12 food_count holds the four bytes that were reserved. */
 typedef struct LnkTickStateHeader {
     uint64_t tick;          /*!< The tick these rows are the settled truth of. */
     uint32_t creature_count;
-    uint8_t reserved0[4];   /*!< Always zero. Named so the asserts can count it. */
+    uint32_t food_count;    /*!< LnkFoodState rows after the creatures, at most LNK_TICK_STATE_MAX_FOOD. */
 } LnkTickStateHeader;
 
 /*! The most creatures one TICK_STATE may carry. A cap rather than a target: the world today is a
     dozen creatures. Since v7 a row carries its chain and since v11 every pose its pitch, so 256
-    rows is 48,144 bytes of payload against the framing's 65,535 ceiling - it fits, and it is now
-    the larger legal frame, a maximal REZ being 45,616; the headroom the cap once had to
-    quadruple was spent on the chain, deliberately. */
+    rows are 48,128 bytes; with the header and a full larder of food (v12) the largest legal
+    TICK_STATE is 16 + 48,128 + 1,536 = 49,680 bytes of payload against the framing's 65,535
+    ceiling - it fits, and it is the larger legal frame, a maximal REZ being 45,616; the headroom
+    the cap once had to quadruple was spent on the chain, deliberately. */
 #define LNK_TICK_STATE_MAX_CREATURES 256u
+
+/*! The most orbs of food one TICK_STATE may carry (protocol v12). A cap rather than a target:
+    the density is Master Control's launch setting, and a few dozen orbs are a few hundred bytes;
+    sixty-four rows of twenty-four bytes are 1,536. */
+#define LNK_TICK_STATE_MAX_FOOD 64u
+
+/*! Receptor types per amphid, and the amphids a body has: the letter's odour readings are
+    LNK_AMPHIDS * LNK_ODOUR_RECEPTORS bound fractions, left amphid (index 0) first, then right
+    (index 1). Eight types because an odour is a pattern of activity across a few types, not a
+    name - small enough for a worm-sized brain (tron-grid-lite docs/CHEMORECEPTION.md). */
+#define LNK_ODOUR_RECEPTORS 8u
+#define LNK_AMPHIDS 2u
 
 /*! ACTIONS, creature host to server: the Program's staged intent for a future tick - the twelve
     bytes of TglActions plus the address, and the PREVIOUS tick's twelve piggybacked beside them,
@@ -361,7 +397,7 @@ typedef struct LnkEvent {
     float position[3];      /*!< Where it happened, metres, world space. */
     float strength;         /*!< Kind-specific magnitude; for a vocalisation, the actuator value. */
     uint32_t creature_id;   /*!< Who caused it. */
-    uint8_t kind;           /*!< LNK_EVENT_VOCALISATION or LNK_EVENT_SCRATCH. Zero is invalid. */
+    uint8_t kind;           /*!< LNK_EVENT_VOCALISATION, LNK_EVENT_SCRATCH or LNK_EVENT_FOOD_GONE. Zero is invalid. */
     uint8_t reserved0[3];   /*!< Always zero. Named so the asserts can count it. */
 } LnkEvent;
 
@@ -390,7 +426,10 @@ typedef struct LnkContact {
     contact_count LnkContact rows that follow this header in the same frame. A spectator never
     receives it; a server never receives it - this library's server half treats the frame
     arriving at the server as the same protocol violation as ACTIONS from a spectator, and the
-    sending half refuses to stage it on a client-held connection. Ninety-six bytes. */
+    sending half refuses to stage it on a client-held connection. Since v12 it also carries
+    chemoreception: what the body swallowed this tick and what its two amphids smell - each
+    reading a receptor's bound fraction, never a concentration, a position or a direction
+    (tron-grid-lite docs/CHEMORECEPTION.md). One hundred and sixty bytes. */
 typedef struct LnkProprioception {
     uint64_t tick;
     uint32_t creature_id;
@@ -408,7 +447,15 @@ typedef struct LnkProprioception {
         which no pose can yield. Same slots as the angles. Finite always. */
     float joint_torques[LNK_SEGMENTS_MAX - 1u];
     uint32_t contact_count;     /*!< Rows that follow, at most LNK_CONTACTS_MAX. */
-    uint8_t reserved1[8];       /*!< Always zero: rounds the letter to its alignment. Named so the asserts can count it. */
+    /*! What the body swallowed this tick, in the world's food unit: zero on most ticks, one bite
+        on a pump, zero always for a body without a mouth. Interoception, a fact about the body's
+        own gut. Non-negative and finite, or refused. */
+    float intake;
+    /*! Bound fraction per receptor type, [0, 1], finite: left amphid 0..7, right 8..15. What a
+        nose measures - saturating, noisy, never a concentration or a direction; the Program
+        infers where food is from how this changes as its body moves. */
+    float odour[LNK_AMPHIDS * LNK_ODOUR_RECEPTORS];
+    uint8_t reserved1[4];       /*!< Always zero: rounds the letter to its alignment. Named so the asserts can count it. */
 } LnkProprioception;
 
 /*! DEREZ, server to every client: the creature leaves the world at this tick. A leave is a
@@ -510,9 +557,13 @@ LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkCreatureState, creature_id) + LNK_MEMBER_B
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkSegmentPose, position) + LNK_MEMBER_BYTES(LnkSegmentPose, yaw) + LNK_MEMBER_BYTES(LnkSegmentPose, pitch) == sizeof(LnkSegmentPose),
                   "LnkSegmentPose has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkTickStateHeader, tick) + LNK_MEMBER_BYTES(LnkTickStateHeader, creature_count)
-                          + LNK_MEMBER_BYTES(LnkTickStateHeader, reserved0)
+                          + LNK_MEMBER_BYTES(LnkTickStateHeader, food_count)
                       == sizeof(LnkTickStateHeader),
                   "LnkTickStateHeader has padding: a member changed width.");
+LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkFoodState, food_id) + LNK_MEMBER_BYTES(LnkFoodState, position) + LNK_MEMBER_BYTES(LnkFoodState, radius)
+                          + LNK_MEMBER_BYTES(LnkFoodState, quantity)
+                      == sizeof(LnkFoodState),
+                  "LnkFoodState has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkActions, tick) + LNK_MEMBER_BYTES(LnkActions, creature_id) + LNK_MEMBER_BYTES(LnkActions, desired_forward_speed)
                           + LNK_MEMBER_BYTES(LnkActions, desired_turn_rate) + LNK_MEMBER_BYTES(LnkActions, vocalisation_strength)
                           + LNK_MEMBER_BYTES(LnkActions, previous_forward_speed) + LNK_MEMBER_BYTES(LnkActions, previous_turn_rate)
@@ -541,13 +592,15 @@ LNK_STATIC_ASSERT(sizeof(LnkRezVertex) == 12u && sizeof(LnkRezTriangle) == 16u &
                   "The REZ rows must stay exactly the sizes the length rule multiplies by.");
 LNK_STATIC_ASSERT(sizeof(LnkSegmentPose) == 20u, "LnkSegmentPose must be 20 bytes: position, yaw, pitch.");
 LNK_STATIC_ASSERT(sizeof(LnkCreatureState) == 188u, "LnkCreatureState must be 188 bytes: id, pose with pitch, velocity, voice, the chain's count and seven poses.");
-LNK_STATIC_ASSERT(sizeof(LnkTickStateHeader) == 16u, "LnkTickStateHeader must be 16 bytes: tick, count, reserved.");
+LNK_STATIC_ASSERT(sizeof(LnkTickStateHeader) == 16u, "LnkTickStateHeader must be 16 bytes: tick, creature count, food count.");
+LNK_STATIC_ASSERT(sizeof(LnkFoodState) == 24u, "LnkFoodState must be 24 bytes: id, centre, radius, quantity.");
 LNK_STATIC_ASSERT(sizeof(LnkActions) == 96u, "LnkActions must be 96 bytes: the tick, the identity, three actions, their tick-1 resend, seven servo targets, their tick-1 resend, and a reserved word.");
 LNK_STATIC_ASSERT(sizeof(LnkEvent) == 32u, "LnkEvent must be 32 bytes: tick, place, strength, cause, kind.");
 LNK_STATIC_ASSERT(sizeof(LnkDerez) == 16u, "LnkDerez must be 16 bytes: tick, id, reserved.");
 LNK_STATIC_ASSERT(sizeof(LnkRefused) == 16u, "LnkRefused must be 16 bytes: tick, id, reason, reserved.");
 LNK_STATIC_ASSERT(sizeof(LnkContact) == 52u, "LnkContact must be 52 bytes: position, impulse, normal, depth, slip.");
-LNK_STATIC_ASSERT(sizeof(LnkProprioception) == 96u, "LnkProprioception must be 96 bytes: tick, id, grounded, reserved, force, seven servo angles, seven servo torques, count, reserved.");
+LNK_STATIC_ASSERT(sizeof(LnkProprioception) == 160u,
+                  "LnkProprioception must be 160 bytes: tick, id, grounded, reserved, force, seven servo angles, seven servo torques, count, intake, sixteen odour readings, reserved.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkContact, position) + LNK_MEMBER_BYTES(LnkContact, impulse) + LNK_MEMBER_BYTES(LnkContact, normal)
                           + LNK_MEMBER_BYTES(LnkContact, depth) + LNK_MEMBER_BYTES(LnkContact, slip)
                       == sizeof(LnkContact),
@@ -555,16 +608,17 @@ LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkContact, position) + LNK_MEMBER_BYTES(LnkC
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkProprioception, tick) + LNK_MEMBER_BYTES(LnkProprioception, creature_id) + LNK_MEMBER_BYTES(LnkProprioception, grounded)
                           + LNK_MEMBER_BYTES(LnkProprioception, reserved0) + LNK_MEMBER_BYTES(LnkProprioception, specific_force)
                           + LNK_MEMBER_BYTES(LnkProprioception, joint_angles) + LNK_MEMBER_BYTES(LnkProprioception, joint_torques)
-                          + LNK_MEMBER_BYTES(LnkProprioception, contact_count)
-                          + LNK_MEMBER_BYTES(LnkProprioception, reserved1)
+                          + LNK_MEMBER_BYTES(LnkProprioception, contact_count) + LNK_MEMBER_BYTES(LnkProprioception, intake)
+                          + LNK_MEMBER_BYTES(LnkProprioception, odour) + LNK_MEMBER_BYTES(LnkProprioception, reserved1)
                       == sizeof(LnkProprioception),
                   "LnkProprioception has padding: a member changed width.");
 LNK_STATIC_ASSERT(sizeof(LnkProprioception) + LNK_CONTACTS_MAX * sizeof(LnkContact) <= 65535u,
                   "A full PROPRIOCEPTION must fit one frame.");
 LNK_STATIC_ASSERT(sizeof(LnkPing) == 8u && sizeof(LnkPong) == 8u, "LnkPing and LnkPong must be 8 bytes: the nonce.");
 
-LNK_STATIC_ASSERT(sizeof(LnkTickStateHeader) + LNK_TICK_STATE_MAX_CREATURES * sizeof(LnkCreatureState) <= LNK_FRAME_PAYLOAD_LIMIT,
-                  "A full TICK_STATE must fit one frame: shrink LNK_TICK_STATE_MAX_CREATURES or redesign the framing.");
+LNK_STATIC_ASSERT(sizeof(LnkTickStateHeader) + LNK_TICK_STATE_MAX_CREATURES * sizeof(LnkCreatureState) + LNK_TICK_STATE_MAX_FOOD * sizeof(LnkFoodState)
+                      <= LNK_FRAME_PAYLOAD_LIMIT,
+                  "A full TICK_STATE must fit one frame: shrink LNK_TICK_STATE_MAX_CREATURES or LNK_TICK_STATE_MAX_FOOD, or redesign the framing.");
 LNK_STATIC_ASSERT(sizeof(LnkRez) + LNK_REZ_MAX_VERTICES * sizeof(LnkRezVertex) + LNK_REZ_MAX_TRIANGLES * sizeof(LnkRezTriangle)
                           + LNK_REZ_MAX_MATERIALS * sizeof(LnkRezMaterial)
                       <= LNK_FRAME_PAYLOAD_LIMIT,

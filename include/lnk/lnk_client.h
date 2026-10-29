@@ -42,7 +42,7 @@ extern "C"
 /*! Bumped whenever this table or its rules change. lnkGetClientVTable refuses any other
     number, so a consumer built against a stale copy of this header is told at load time
     rather than corrupted at call time. */
-#define LNK_CLIENT_ABI_VERSION 9u
+#define LNK_CLIENT_ABI_VERSION 10u
 
 /*
     Statuses. Zero is success and only success; everything else names its failure. No function
@@ -88,10 +88,12 @@ typedef struct LnkServer LnkServer;
 
 /*! A received TICK_STATE: the header by value, the rows by borrow. The rows live in the
     library and stay valid until the next poll() or close() on the same client - copy them out
-    if they must outlive that, exactly as the Program ABI's borrow rules already taught. */
+    if they must outlive that, exactly as the Program ABI's borrow rules already taught. Since
+    ABI 10 (protocol v12) the orbs of food ride beside the creatures under the same rules. */
 typedef struct LnkTickStateView {
     LnkTickStateHeader header;
     const LnkCreatureState* states; /*!< creature_count rows, library-owned. */
+    const LnkFoodState* foods;      /*!< food_count rows, library-owned. */
 } LnkTickStateView;
 
 /*! A received REZ: the header by value, the rows by borrow with the same lifetime rules as the
@@ -239,10 +241,14 @@ typedef struct LnkClientVTable {
         check bites in both directions and the client verifies what it is welcomed into. */
     LnkStatus (*send_welcome)(LnkClient* connection, const LnkWelcome* welcome);
 
-    /*! Stage a TICK_STATE: the header, then header->creature_count rows read from `states`.
-        The count is validated against LNK_TICK_STATE_MAX_CREATURES before a single row is
-        read, so a lying count cannot make the library read past the caller's array. */
-    LnkStatus (*send_tick_state)(LnkClient* connection, const LnkTickStateHeader* header, const LnkCreatureState* states);
+    /*! Stage a TICK_STATE: the header, then header->creature_count rows read from `states` and
+        header->food_count rows read from `foods`. Both counts are validated against
+        LNK_TICK_STATE_MAX_CREATURES and LNK_TICK_STATE_MAX_FOOD before a single row is read, so
+        a lying count cannot make the library read past the caller's arrays; a zero count never
+        touches its pointer, and a count with no rows behind it is LNK_BAD_ARGUMENT. Every food
+        row is judged as the receiving end judges it - finite, radius positive, quantity in
+        (0, 1] - and a refused row stages nothing. */
+    LnkStatus (*send_tick_state)(LnkClient* connection, const LnkTickStateHeader* header, const LnkCreatureState* states, const LnkFoodState* foods);
 
     /*! Stage an EVENT - tick-stamped notification, never load-bearing state. */
     LnkStatus (*send_event)(LnkClient* connection, const LnkEvent* event);
@@ -259,6 +265,8 @@ typedef struct LnkClientVTable {
     /*! Stage a PROPRIOCEPTION on a server-held connection - the owner's letter: the header,
         then header->contact_count rows read from `contacts`. The count is validated against
         LNK_CONTACTS_MAX before a single row is read; a zero count never touches the pointer.
+        Since protocol v12 the header carries intake and odour too, judged as the receiving end
+        judges them (intake non-negative, every reading in [0, 1], all finite).
         Refused with LNK_BAD_ARGUMENT on a connection this end dialled (a client never sends
         it), on a null header, and on a count with no rows behind it. */
     LnkStatus (*send_proprioception)(LnkClient* connection, const LnkProprioception* proprioception, const LnkContact* contacts);
