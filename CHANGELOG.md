@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   live world, how to build and check on the Windows desk, and the way from a change to a PR - each mirrored verbatim
   in every repo that uses it and improved every time it is used, so no session reinvents them.
 
+- **The wire, drawn: `docs/PROTOCOL.md`, and a README that shows before it tells.** Readers found the
+  organisation text-heavy, so the README now opens with one plain sentence, a Mermaid picture of who
+  talks to whom - Master Control, the spectator, the creature host, every one loading this library -
+  and a Start Here of build and test commands, the good first issues and CONTRIBUTING.md; the old
+  Building section folds into it. `docs/PROTOCOL.md` is an illustrated companion to
+  `include/lnk/lnk_protocol.h`, which stays the contract of record: the frame header, the twelve
+  messages with their directions and sizes, a sequence diagram of a session's life from HELLO through
+  REZ, the per-tick TICK_STATE, ACTIONS, EVENT and PROPRIOCEPTION, to BYE and the DEREZ it causes, and
+  the layout of a TICK_STATE. Diagrams are Mermaid text, so GitHub draws them and git diffs them.
+
 - **Every contributor credited, and their copyright kept.** README.md gains a Contributors section that
   lists everyone who helps, for any kind of contribution - code, documentation, bug reports, reviews,
   ideas, answers in Discussions - following the All Contributors specification and its emoji key, kept by

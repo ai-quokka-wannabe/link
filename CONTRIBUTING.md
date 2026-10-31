@@ -224,6 +224,7 @@ chore: update pinned actions
 | `SECURITY.md` | Security policy and vulnerability reporting |
 | `CHANGELOG.md` | User-facing change history |
 | `TODO.md` | The etapes behind the wire, and what is open |
+| `docs/PROTOCOL.md` | The wire drawn: who talks to whom, a frame, the twelve messages, a session's life |
 | `docs/VISION.md` | The organisation's shared vision, and the wire's part in it |
 | `docs/DEV_ENV_SETUP.md` | The complete development guide: the pins, CI's legs at home, changing the wire |
 
