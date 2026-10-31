@@ -1,11 +1,50 @@
 # link
 
-**Link** — the wire of the Grid. Link is the library's official name, capitalised the way Master
-Control is; `link`, lowercase, names only this repository.
+**Link is the wire of the Grid: the one protocol library that the world server and every window and
+creature on the Grid load to talk to each other.**
 
-One protocol library that Master Control and every TronGrid Lite instance load as the same
-shared binary — Rust behind a plain C ABI — so the two ends of the wire cannot drift apart:
-there is no second implementation to disagree with the first.
+```mermaid
+flowchart LR
+    HOST["Creature host<br/>the Grid hosting a Program,<br/>such as rc-worm"]
+    MC["Master Control<br/>the world server, Rust"]
+    SPEC["Spectator<br/>the Grid window you watch"]
+    HOST -- "REZ, ACTIONS" --> MC
+    MC -- "TICK_STATE, EVENT, PROPRIOCEPTION" --> HOST
+    MC -- "TICK_STATE, EVENT" --> SPEC
+```
+
+Every box loads the same built `link` library and every arrow is a Link connection over TCP. A creature
+host embodies a creature (REZ) and sends what its Program wants to do (ACTIONS); Master Control steps
+the world and sends back the whole settled world every tick (TICK_STATE), the sounds in it (EVENT), and
+to each creature's own host what its body felt (PROPRIOCEPTION). [docs/PROTOCOL.md](docs/PROTOCOL.md)
+draws a session's whole life, message by message.
+
+## Start Here
+
+```bash
+cargo build --release
+cargo test
+```
+
+Rust 1.99.1, pinned by `rust-toolchain.toml` and installed by [rustup](https://rustup.rs/) on first
+use; a C toolchain for the linker, and nothing else.
+
+- **Looking for something to do?** The
+  [good first issues](https://github.com/ai-quokka-wannabe/link/issues?q=is%3Aopen+label%3A%22good+first+issue%22)
+  are picked to be small and self-contained.
+- **Ready to send a change?** [CONTRIBUTING.md](CONTRIBUTING.md) says how, and how you are credited.
+- **Setting up from nothing?** [docs/DEV_ENV_SETUP.md](docs/DEV_ENV_SETUP.md) builds and tests the
+  wire on Windows or Linux exactly as CI does, and says how a change to the wire reaches the other
+  three repositories. The flagship's
+  [RUNNING_THE_GRID.md](https://github.com/ai-quokka-wannabe/tron-grid-lite/blob/main/docs/RUNNING_THE_GRID.md)
+  stands the whole ecosystem up.
+
+## What Link Is
+
+**Link** is the library's official name, capitalised the way Master Control is; `link`, lowercase,
+names only this repository. Master Control and every TronGrid Lite instance load it as the same
+shared binary — Rust behind a plain C ABI — so the two ends of the wire cannot drift apart: there is
+no second implementation to disagree with the first.
 
 ## The Four Repositories
 
@@ -40,22 +79,6 @@ enter with avatars to meet them, an aim of years taken in baby steps — is set 
 - **One binary rather than one source.** Master Control, the creature host and the spectator all
   load the same `link` library, so a protocol drift between them is unrepresentable.
 
-## Building
-
-> **New here?** [docs/DEV_ENV_SETUP.md](docs/DEV_ENV_SETUP.md) builds and tests the wire from nothing
-> on Windows or Linux, exactly as CI does, and says how a change to the wire reaches the other
-> three repositories. The flagship's
-> [RUNNING_THE_GRID.md](https://github.com/ai-quokka-wannabe/tron-grid-lite/blob/main/docs/RUNNING_THE_GRID.md)
-> stands the whole ecosystem up.
-
-```bash
-cargo build --release
-cargo test
-```
-
-Rust 1.99.1, pinned by `rust-toolchain.toml` and installed by [rustup](https://rustup.rs/) on first
-use. Nothing else.
-
 ## Consuming From CMake
 
 A CMake consumer never learns cargo exists: `add_subdirectory()` this repository and it offers
@@ -73,7 +96,7 @@ platforms, so it cannot rot: it is the build, not a side check.
 The contract is pinned at protocol version 12: `include/lnk/lnk_protocol.h` carries the framing,
 all twelve messages as no-padding PODs, and the fingerprint the handshake refuses mismatches with —
 mirrored field for field and size-asserted again in `src/protocol.rs`, guarded in CI by
-`tools/check_protocol_version.py`. The codec turns frames into messages by refusal, and the
+`tools/check_protocol_version.py`, and drawn in [docs/PROTOCOL.md](docs/PROTOCOL.md). The codec turns frames into messages by refusal, and the
 transport carries them over TCP — a mismatched contract is refused at the handshake in words a
 human can read. The built library exports one symbol, `lnkGetClientVTable`
 (`include/lnk/lnk_client.h`), behind which both ends of the wire live — the connecting client
