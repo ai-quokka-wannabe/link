@@ -1,4 +1,3 @@
-/build
 /.qtcreator
 /.vs
 .claude/settings.local.json
@@ -15,6 +14,7 @@
 # Bytecode, which appears as soon as anything imports a tool rather than running it.
 __pycache__/
 *.pyc
+
 # The CMake face, built through its preset - from CI or from curiosity.
 /build
 

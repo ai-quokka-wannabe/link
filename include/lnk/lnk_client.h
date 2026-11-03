@@ -127,7 +127,7 @@ typedef struct LnkMessageView {
         LnkPing ping;
         LnkPong pong;
         LnkHello hello;     /*!< Only on a server-held connection; at a client it is the wrong way, and refused. */
-        LnkActions actions; /*!< Likewise: a client's word. Every message flows one way, and the wire judges. */
+        LnkActions actions; /*!< Likewise: a client's word. Every message flows its own way, and the wire judges. */
         LnkRezView rez;     /*!< A creature entering the world, validated whole by the wire. */
         LnkProprioceptionView proprioception; /*!< The owner's letter: this body's feel this tick. */
     } as;
@@ -167,13 +167,13 @@ typedef struct LnkClientVTable {
         it does not. Never blocks. Any other status ends the connection's useful life, the socket
         already shut: a frame the codec refuses; ACTIONS or REZ on a server-held connection whose
         HELLO said spectator, the role violation the protocol header names; and a message the
-        wrong way - WELCOME, TICK_STATE, EVENT or PROPRIOCEPTION arriving at the server, HELLO or
-        ACTIONS arriving at a client - since every message flows one way. All LNK_FRAME_REFUSED,
-        the detail naming which. */
+        wrong way - WELCOME, TICK_STATE, EVENT, PROPRIOCEPTION or REFUSED arriving at the server,
+        HELLO or ACTIONS arriving at a client - since every message flows its own way. All
+        LNK_FRAME_REFUSED. */
     LnkStatus (*poll)(LnkClient* client, LnkMessageView* out_message);
 
-    /*! Stage the creature's intent for the next flush - the current tick's twelve bytes and the
-        previous tick's twelve resent, exactly as ACTIONS on the wire. Refused with
+    /*! Stage the creature's intent for the next flush - the current tick's forty bytes and the
+        previous tick's forty resent, exactly as ACTIONS on the wire. Refused with
         LNK_BAD_ARGUMENT on a connection that introduced itself as a spectator: a spectator
         never sends ACTIONS, and the refusal starts at the sending half. */
     LnkStatus (*send_actions)(LnkClient* client, const LnkActions* actions);

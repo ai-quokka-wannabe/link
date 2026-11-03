@@ -95,9 +95,9 @@ jobs:
 
             # LNK_PROTOCOL_VERSION stops two ends of the wire shaking hands on a number while
             # disagreeing about the bytes, and nothing enforces it by itself. So the header is
-            # fingerprinted with the version line removed, and a changed fingerprint at an
-            # unchanged version is refused here rather than in a reviewer's memory - the same
-            # mechanism, and the same fingerprint, the handshake itself carries.
+            # fingerprinted with the version line and the comments removed, and a changed
+            # fingerprint at an unchanged version is refused here rather than in a reviewer's
+            # memory - the same mechanism, and the same fingerprint, the handshake itself carries.
             - name: Check the Link protocol version was bumped
               run: python3 tools/check_protocol_version.py check
 
@@ -149,7 +149,7 @@ jobs:
             - name: Formatting must be canonical
               run: cargo fmt --check
 
-            # The doc comments are half of what these crates are; a broken intra-doc link or a
+            # The doc comments are half of what this crate is; a broken intra-doc link or a
             # missing code-block language is a lie waiting for a reader.
             - name: Documentation builds without a warning
               env:

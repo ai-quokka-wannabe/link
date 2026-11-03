@@ -69,8 +69,8 @@ pub enum Message {
 /// that cannot be diagnosed gets worked around instead of fixed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DecodeError {
-    /// The type byte is not a v1 message. REZ lands here too: its number is reserved and its
-    /// payload undefined, so an end that receives one refuses it as unknown.
+    /// The type byte names no message: zero, which is invalid by design, or a number past the
+    /// last message this version defines.
     UnknownOrReservedType(u8),
     /// The payload length does not match what the type demands.
     WrongLength {
@@ -129,9 +129,9 @@ pub enum DecodeError {
         count: u32,
         rows_by_length: usize,
     },
-    /// A grounded byte that is neither 0 nor 1, or a force, servo, intake, odour or contact
-    /// value that is not finite.
+    /// A grounded byte that is neither 0 nor 1.
     InvalidGrounded(u8),
+    /// A force, servo, intake, odour or contact value that is not finite.
     ProprioceptionNotFinite,
     /// A role byte that is neither spectator nor creature host.
     InvalidRole(u8),
@@ -761,7 +761,6 @@ fn judge_food(food: &FoodState) -> Result<(), FoodVerdict> {
     Ok(())
 }
 
-/// The spacing rule: finite always; zero for a chain of one, strictly positive otherwise.
 /// The servos' bounds as REZ may declare them: both finite and non-negative, and zero
 /// together or set together - a servo with no torque, or torque with no swing, is a body
 /// describing an actuator it does not have.
@@ -773,6 +772,7 @@ fn servos_fit(max_joint_angle: f32, max_joint_torque: f32) -> bool {
         && ((max_joint_angle == 0.0) == (max_joint_torque == 0.0))
 }
 
+/// The spacing rule: finite always; zero for a chain of one, strictly positive otherwise.
 fn spacing_fits(segment_count: u32, spacing: f32) -> bool {
     spacing.is_finite() && if segment_count > 1 { spacing > 0.0 } else { spacing == 0.0 }
 }
@@ -789,23 +789,29 @@ fn state_floats(state: &CreatureState) -> impl Iterator<Item = f32> + '_ {
         .chain(state.segments.iter().flat_map(|pose| pose.position.iter().copied().chain([pose.yaw, pose.pitch])))
 }
 
+/// Why a creature row was refused; each end turns it into its own vocabulary.
+enum StateVerdict {
+    /// The chain is empty or over the cap; the count it declared.
+    SegmentCountOutOfRange(u32),
+    NotFinite,
+    SlotNotZero,
+}
+
 /// The chain rules of one row, both ways: a count in range, every float finite, every slot
 /// beyond the chain all zero.
-fn judge_state(state: &CreatureState) -> Result<(), (u32, u32)> {
-    // The pair names the refusal: (kind, count) with kind 1 = count out of range, 2 = not
-    // finite, 3 = a slot not zero; the caller turns it into its own error vocabulary.
+fn judge_state(state: &CreatureState) -> Result<(), StateVerdict> {
     if state.segment_count == 0 || state.segment_count > SEGMENTS_MAX {
-        return Err((1, state.segment_count));
+        return Err(StateVerdict::SegmentCountOutOfRange(state.segment_count));
     }
     if state_floats(state).any(|value| !value.is_finite()) {
-        return Err((2, 0));
+        return Err(StateVerdict::NotFinite);
     }
     let meaningful = (state.segment_count - 1) as usize;
     if state.segments[meaningful..]
         .iter()
         .any(|pose| pose.position.iter().any(|axis| axis.to_bits() != 0) || pose.yaw.to_bits() != 0 || pose.pitch.to_bits() != 0)
     {
-        return Err((3, 0));
+        return Err(StateVerdict::SlotNotZero);
     }
     Ok(())
 }
@@ -852,16 +858,16 @@ fn decode_tick_state(payload: &[u8]) -> Result<Message, DecodeError> {
         }
         match judge_state(&state) {
             Ok(()) => {}
-            Err((1, count)) => {
+            Err(StateVerdict::SegmentCountOutOfRange(count)) => {
                 return Err(DecodeError::SegmentCountOutOfRange {
                     creature_id: state.creature_id,
                     count,
                 });
             }
-            Err((2, _)) => {
+            Err(StateVerdict::NotFinite) => {
                 return Err(DecodeError::TickStateNotFinite { creature_id: state.creature_id });
             }
-            Err(_) => {
+            Err(StateVerdict::SlotNotZero) => {
                 return Err(DecodeError::SegmentSlotNotZero { creature_id: state.creature_id });
             }
         }
@@ -1036,16 +1042,16 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             for state in states {
                 match judge_state(state) {
                     Ok(()) => {}
-                    Err((1, count)) => {
+                    Err(StateVerdict::SegmentCountOutOfRange(count)) => {
                         return Err(EncodeError::SegmentCountOutOfRange {
                             creature_id: state.creature_id,
                             count,
                         });
                     }
-                    Err((2, _)) => {
+                    Err(StateVerdict::NotFinite) => {
                         return Err(EncodeError::TickStateNotFinite { creature_id: state.creature_id });
                     }
-                    Err(_) => {
+                    Err(StateVerdict::SlotNotZero) => {
                         return Err(EncodeError::SegmentSlotNotZero { creature_id: state.creature_id });
                     }
                 }
@@ -1246,7 +1252,7 @@ fn read_u64(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(eight)
 }
 
-/// Seven floats in a row, the servo targets' shape.
+/// Seven floats in a row, one per joint: the shape of the servo targets, angles and torques.
 fn read_f32x7(payload: &[u8], at: usize) -> [f32; 7] {
     let mut out = [0.0f32; 7];
     for (index, value) in out.iter_mut().enumerate() {

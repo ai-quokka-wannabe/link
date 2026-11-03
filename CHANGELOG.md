@@ -9,9 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Claude skills, shared across the org.** `.claude/skills/` gains windows-build and org-pr-flow - how to run, drive and stop a
-  live world, how to build and check on the Windows desk, and the way from a change to a PR - each mirrored verbatim
-  in every repo that uses it and improved every time it is used, so no session reinvents them.
+- **Claude skills, shared across the org.** `.claude/skills/` gains windows-build and org-pr-flow - how to build and
+  check on the Windows desk, and the way from a change to a PR - each mirrored verbatim in every repo that uses it
+  and improved every time it is used, so no session reinvents them.
 
 - **The wire, drawn: `docs/PROTOCOL.md`, and a README that shows before it tells.** Readers found the
   organisation text-heavy, so the README now opens with one plain sentence, a Mermaid picture of who
@@ -451,6 +451,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An audit of the whole tree, the minor and the cosmetic included.** The maintainer's ask: fix everything, and read
+  every warning the builds and tests print - and there were none to read: build, clippy, rustdoc with and without
+  private items, and a test run all print nothing but their results. What the reading found instead:
+    - *A test that tested the wrong thing.* The Disk's wrong-magic refusal was proved with 70 bytes against a 72-byte
+      header, so it was the short-file refusal that answered; the bytes are a whole header now, and each refusal is
+      matched by its words. The Disk's contract refusals - another version, a modified header at the same version -
+      had no test at all, and have one.
+    - *Tests that left files behind.* A Disk test that failed half-way left its file in `target/test-scratch/`; a
+      scratch path now removes its file when the test lets go of it, unwinding included.
+    - *Twins that only one side checked.* The header-parsing twin test now also holds the frame constants, the
+      magic, all twelve message types, both roles and all four refusal reasons to the header, not only the caps and
+      kinds; the exact-size test names PROPRIOCEPTION's `None` beside REZ's and TICK_STATE's; `Contact` gets the
+      sum-of-members assert every other struct has.
+    - *Comments that had gone stale.* REZ's layout was still "not defined yet" in two doc comments since v4; ACTIONS
+      still carried "twelve bytes" of intent, which became forty at v9, in both headers and the mirror; `Contact` said
+      twenty-four bytes for its fifty-two; the wrong-way lists left out REFUSED arriving at the server; the spectator
+      refusal named ACTIONS where it is ACTIONS or REZ, in its doc and its log line; `poll` promised a detail it has no
+      buffer for; the handle-safety contract named one of the four calls that make a handle; a doc comment sat on
+      the wrong function; "an interval refuses" became the words it meant. The C headers' changes are comments only,
+      and the fingerprint, which strips comments, stands.
+    - *Smaller things.* The creature-row verdict is a named enum like the food and smell verdicts, not a tuple of
+      magic numbers; `close` no longer sets blocking twice; the client's "closed without a word" refusal opens with
+      `link:` like every other; each REZ cap has its own doc; the test module's imports come before its tests.
+    - *The documents.* The guide's test budget is five seconds, not thirty; its docs step shows `RUSTDOCFLAGS`, so
+      warnings fail at home as in CI; the fingerprint is said to drop comments and whitespace too; PROTOCOL.md's
+      refusals before WELCOME include a different world; the skills entry above described a third skill this
+      repository does not carry; three entries below lacked the blank line between them.
+    - *CI.* The release's test step runs `--locked` like every other cargo step; two comments say what the check
+      strips and how many crates there are; `.gitignore` listed `/build` twice.
+
+  No byte of the wire moved, the client ABI did not move, and the fingerprint stands.
+
 - **The tests stop asking the environment where to write.** Their Disk files went to `std::env::temp_dir()`, which
   reads `TMP`, and code scanning counts an environment variable as user input - so every path the tests built, and
   the production `File::create` / `File::open` those paths reached, raised `rust/path-injection` (alerts #12-#19),
@@ -461,9 +493,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The linter's regular expressions are the patched ones.** markdownlint 0.42.0 pins re2js 2.8.6, which has a
   quadratic-time denial of service in lookbehind matching (Dependabot #9 in link, #8 in master-control and the
   siblings' own); `package.json` overrides it to 2.8.7, the patch release. The linter passes as before.
+
 - **The linter's math renderer is the patched one.** markdownlint reaches KaTeX through
   `micromark-extension-math`, whose `^0.16` range cannot reach the prototype-pollution fix in 0.18.2
   (Dependabot #7), so `package.json` overrides it to 0.18.2. The linter loads it and passes as before.
+
 - **Every code file carries its notice.** The credit entry under Added said every source file's header
   names The AiQuokkaWannabe Authors; only the two C headers had one. The six Rust sources, the CMake
   face, `tools/check_protocol_version.py` and the two CI scripts now open with the GPL-3.0-or-later

@@ -31,8 +31,9 @@
     - Integers and floats cross the wire little-endian, exactly as an x86-64 host lays them out;
       a big-endian consumer must swap, and the Rust side refuses to compile big-endian rather
       than pretend. Nothing here is text; nothing here is negotiated.
-    - Zero is never a valid identity: message type 0, role 0 and event kind 0 are all invalid,
-      so a zeroed buffer read as a message refuses loudly instead of meaning something.
+    - Zero is never a valid identity: message type 0, role 0, event kind 0 and refusal reason 0
+      are all invalid, so a zeroed buffer read as a message refuses loudly instead of meaning
+      something.
 */
 
 #ifndef LNK_PROTOCOL_H
@@ -272,7 +273,7 @@ typedef struct LnkRezMaterial {
     places along the head's recorded path, every one wearing the REZ's model; the joint between
     two segments is authored into the model itself, so the wire carries poses and nothing else.
     Eight is a worm of eight icosahedra; with every pose twenty bytes and, since v12, a full
-    larder of food rows, a full TICK_STATE is 49,680 bytes - the larger legal frame, comfortably
+    larder of food rows, a full TICK_STATE is 49,680 bytes - the largest legal frame, comfortably
     under the framing's ceiling. */
 #define LNK_SEGMENTS_MAX 8u
 
@@ -347,8 +348,8 @@ typedef struct LnkTickStateHeader {
 #define LNK_ODOUR_RECEPTORS 8u
 #define LNK_AMPHIDS 2u
 
-/*! ACTIONS, creature host to server: the Program's staged intent for a future tick - the twelve
-    bytes of TglActions plus the address, and the PREVIOUS tick's twelve piggybacked beside them,
+/*! ACTIONS, creature host to server: the Program's staged intent for a future tick - the forty
+    bytes of TglActions plus the address, and the PREVIOUS tick's forty piggybacked beside them,
     so one lost or late message loses nothing (Tribes repeated its moves across datagrams for
     exactly this reason; redundant on TCP, load-bearing the day the UDP trigger fires).
 
