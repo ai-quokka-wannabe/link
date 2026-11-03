@@ -335,7 +335,7 @@ fn detail_of(error: &TransportError) -> String {
         TransportError::Garbled(expectation) => format!("link: garbled handshake: {expectation}"),
         TransportError::PeerClosed => "link: the peer closed the connection".to_string(),
         TransportError::HandshakeTimedOut => "link: the handshake timed out".to_string(),
-        TransportError::ActionsFromSpectator => "link: a spectator sent ACTIONS - the connection is over".to_string(),
+        TransportError::ActionsFromSpectator => "link: a spectator sent ACTIONS or REZ - the connection is over".to_string(),
         TransportError::WrongWay(name) => {
             let (sender, owner) = if matches!(*name, "HELLO" | "ACTIONS") {
                 ("the server", "a client")
@@ -460,8 +460,9 @@ extern "C" fn connect_impl(
 ///
 /// # Safety
 ///
-/// `client` must be a pointer returned by [`connect_impl`] and not yet passed to
-/// [`close_impl`] — which is exactly the contract the header states.
+/// `client` must be a pointer returned by [`connect_impl`], [`accept_impl`], [`record_open_impl`]
+/// or [`replay_open_impl`] and not yet passed to [`close_impl`] — which is exactly the contract
+/// the header states.
 unsafe fn inner_of<'a>(client: *mut LnkClient) -> &'a mut ClientInner {
     // SAFETY: delegated to the caller, per the function's contract above.
     unsafe { &mut *client.cast::<ClientInner>() }
@@ -571,7 +572,8 @@ extern "C" fn send_actions_impl(client: *mut LnkClient, actions: *const Actions)
         let inner = unsafe { inner_of(client) };
         if !inner.end.may_send_intents() {
             // A spectator never sends ACTIONS, and the refusal starts at the sending half so an
-            // honest client cannot even stage the violation the server end would hang up on.
+            // honest client cannot even stage the violation the server end would hang up on. A
+            // replay has nobody to send to, and is refused here too.
             return LNK_BAD_ARGUMENT;
         }
         // SAFETY: non-null was just checked; Actions is plain old data, read by copy.
@@ -1018,8 +1020,9 @@ extern "C" fn close_impl(client: *mut LnkClient) {
         if client.is_null() {
             return;
         }
-        // SAFETY: the header's contract - a pointer from connect, not yet closed - and from
-        // here the box owns it again, so it is freed exactly once.
+        // SAFETY: the header's contract - a pointer from connect, accept, record_open or
+        // replay_open, not yet closed - and from here the box owns it again, so it is freed
+        // exactly once.
         let inner = unsafe { Box::from_raw(client.cast::<ClientInner>()) };
         inner.end.close();
     });
@@ -1027,6 +1030,25 @@ extern "C" fn close_impl(client: *mut LnkClient) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::codec::Message;
+    use crate::protocol::{EventKind, TICK_STATE_MAX_CREATURES, TickStateHeader};
+    use crate::transport::accept;
+    use std::ffi::CString;
+    use std::net::TcpListener;
+
+    const PATIENCE: Duration = Duration::from_secs(5);
+    /// The one world every test here lives in - a fingerprint, not a definition, because the
+    /// transport only ever compares the number.
+    const WORLD: u64 = 0x5EED_0F7E_601D;
+
+    fn vtable() -> &'static LnkClientVTable {
+        let table = lnkGetClientVTable(LNK_CLIENT_ABI_VERSION);
+        // SAFETY: as_ref is the null check and the dereference in one inseparable expression;
+        // the non-null pointer is the static VTABLE, alive for the program's whole life.
+        unsafe { table.as_ref() }.expect("the library must satisfy its own version")
+    }
+
     #[test]
     fn a_zero_timeout_is_a_bad_argument_at_both_ends_before_any_knock_is_answered() {
         let table = vtable();
@@ -1062,25 +1084,6 @@ mod tests {
         super::write_detail(detail.as_mut_ptr().cast::<c_char>(), detail.len() as u32, "aéaé");
         let words = unsafe { CStr::from_ptr(detail.as_ptr().cast::<c_char>()) };
         assert_eq!(words.to_str().expect("the line stays UTF-8"), "aéa");
-    }
-
-    use super::*;
-    use crate::codec::Message;
-    use crate::protocol::{EventKind, TICK_STATE_MAX_CREATURES, TickStateHeader};
-    use crate::transport::accept;
-    use std::ffi::CString;
-    use std::net::TcpListener;
-
-    const PATIENCE: Duration = Duration::from_secs(5);
-    /// The one world every test here lives in - a fingerprint, not a definition, because the
-    /// transport only ever compares the number.
-    const WORLD: u64 = 0x5EED_0F7E_601D;
-
-    fn vtable() -> &'static LnkClientVTable {
-        let table = lnkGetClientVTable(LNK_CLIENT_ABI_VERSION);
-        // SAFETY: as_ref is the null check and the dereference in one inseparable expression;
-        // the non-null pointer is the static VTABLE, alive for the program's whole life.
-        unsafe { table.as_ref() }.expect("the library must satisfy its own version")
     }
 
     #[test]
@@ -2125,7 +2128,6 @@ mod tests {
         assert_eq!(status, LNK_BAD_ARGUMENT);
         assert!((table.replay_open)(c_path.as_ptr(), WORLD, std::ptr::null_mut(), &raw mut status, std::ptr::null_mut(), 0).is_null());
         assert_eq!(status, LNK_BAD_ARGUMENT);
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

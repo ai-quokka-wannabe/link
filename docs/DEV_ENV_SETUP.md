@@ -79,7 +79,7 @@ On both platforms, on every pull request and on `main`:
 |------|---------|---------------|
 | Format | `cargo fmt --check` | rustfmt, with `rustfmt.toml`'s 170-column limit |
 | Lint | `cargo clippy --locked --all-targets -- --deny warnings` | `clippy::all` as errors |
-| Docs | `cargo doc --locked --no-deps --document-private-items` | Every doc comment, warnings as errors |
+| Docs | `RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --document-private-items` | Every doc comment, warnings as errors |
 | Tests | `cargo test --locked` | The codec both ways, the transport over real loopback sockets, the C ABI through its own vtable, the Disk written and replayed |
 | The fingerprint | `python tools/check_protocol_version.py check` | The recorded fingerprint of `lnk_protocol.h` still describes the header - so a change to the wire cannot land without its version bump |
 | The CMake face | `cmake --workflow --preset default` | What a consumer sees: cargo driven by CMake, on both platforms, so the face cannot rot. It is `LANGUAGES NONE` and probes no compiler; the copy-beside rule it offers is exercised by the consumers that call it |
@@ -104,8 +104,9 @@ its own:
    keep - 0.0.0 - only refusals to keep honest: two ends that disagree say both versions and hang
    up.
 2. **Re-record the fingerprint.** `python tools/check_protocol_version.py update` re-records the
-   hash of the header (with the version line removed) and refuses unless the version moved when
-   the content did. CI's `check` compares.
+   hash of the header (with the version line, the comments and the whitespace removed, so a
+   reworded comment needs no bump) and refuses unless the version moved when the content did.
+   CI's `check` compares.
 3. **Mirror it in Rust, and pin it.** Every struct is `#[repr(C)]` with a `const` size assert in
    `src/protocol.rs`, and the header carries `LNK_STATIC_ASSERT`s for the same sizes and for the
    absence of padding; `cargo test` parses the headers themselves for the twin constants, so the
@@ -154,9 +155,9 @@ without a bump on purpose.
 
 ### A transport test times out
 
-They use real loopback sockets with a 30-second budget. A firewall that blocks loopback, or a
-machine under heavy load, is the usual cause; `cargo test -- --test-threads=1` helps a loaded
-laptop.
+They use real loopback sockets, each wait bounded at five seconds. A firewall that blocks
+loopback, or a machine under heavy load, is the usual cause; `cargo test -- --test-threads=1`
+helps a loaded laptop.
 
 ### The CMake face cannot find cargo
 

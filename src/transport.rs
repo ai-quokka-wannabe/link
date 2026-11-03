@@ -55,14 +55,15 @@ pub enum TransportError {
     /// The handshake's timeout elapsed. Windows reports this as `TimedOut` and Unix as
     /// `WouldBlock`; both normalise here so callers match one thing.
     HandshakeTimedOut,
-    /// An ACTIONS frame arrived on a spectator-role connection: a protocol violation the
+    /// An ACTIONS or REZ frame arrived on a spectator-role connection: a protocol violation the
     /// library enforces itself, on the server end, so the rule cannot drift between consumers.
     /// The connection is shut before this is returned.
     ActionsFromSpectator,
-    /// A message arrived at the end that only sends it: WELCOME, TICK_STATE, EVENT or
-    /// PROPRIOCEPTION at the server, HELLO or ACTIONS at the client. Every message flows one
-    /// way, and an end that speaks the other's words is violating the protocol - an interval
-    /// refuses both directions of nonsense. The name says which; the connection is shut first.
+    /// A message arrived at the end that only sends it: WELCOME, TICK_STATE, EVENT,
+    /// PROPRIOCEPTION or REFUSED at the server, HELLO or ACTIONS at the client. Every message
+    /// flows its own way, and an end that speaks the other's words is violating the protocol -
+    /// the wire refuses nonsense in both directions. The name says which; the connection is shut
+    /// first.
     WrongWay(&'static str),
     /// The outgoing buffer passed [`WRITE_BUFFER_LIMIT_BYTES`] — the peer is not reading, and
     /// an unbounded buffer would be an allocation the peer controls. The connection is over.
@@ -234,11 +235,11 @@ pub struct Connection {
     stream: TcpStream,
     reader: FrameReader,
     writer: WriteBuffer,
-    /// True on a server-held connection whose peer said spectator in HELLO: an ACTIONS frame
-    /// arriving here is the role violation [`TransportError::ActionsFromSpectator`] names.
+    /// True on a server-held connection whose peer said spectator in HELLO: an ACTIONS or REZ
+    /// frame arriving here is the role violation [`TransportError::ActionsFromSpectator`] names.
     forbid_incoming_actions: bool,
     /// True on a client-held connection that introduced itself as a spectator: the sending
-    /// half's mirror of the same rule, enforced at the ABI's `send_actions`.
+    /// half's mirror of the same rule, enforced at the ABI's `send_actions` and `send_rez`.
     forbid_outgoing_actions: bool,
     /// True on a server-held connection: the one end that may send PROPRIOCEPTION, and the one
     /// end that must never receive it.
@@ -274,8 +275,9 @@ impl Connection {
     }
 
     /// One complete message if the socket holds one, `None` if it does not yet. Any refusal —
-    /// unknown type, impossible length, a payload the codec rejects, ACTIONS from a spectator —
-    /// is the connection's end: hang up and report, exactly as the doctrine demands.
+    /// unknown type, impossible length, a payload the codec rejects, ACTIONS or REZ from a
+    /// spectator, a message the wrong way — is the connection's end: hang up and report, exactly
+    /// as the doctrine demands.
     pub fn poll(&mut self) -> Result<Option<Message>, TransportError> {
         match self.reader.pump(&mut self.stream)? {
             None => Ok(None),
@@ -345,7 +347,6 @@ impl Connection {
         // leave would arrive there as a crash. Found the honest way: the first per-owner
         // letter made the server write often enough to lose the farewell.
         let _ = self.stream.shutdown(Shutdown::Write);
-        let _ = self.stream.set_nonblocking(false);
         let _ = self.stream.set_read_timeout(Some(FAREWELL_WINDOW));
         let deadline = std::time::Instant::now() + FAREWELL_WINDOW;
         let mut sink = [0u8; 1024];
@@ -504,7 +505,7 @@ fn connect_bounded<A: ToSocketAddrs>(address: A, timeout: Duration) -> Result<Tc
 fn read_answer(stream: &mut TcpStream, header: &mut [u8; FRAME_HEADER_BYTES]) -> Result<(), TransportError> {
     match read_exactly(stream, header) {
         Err(TransportError::PeerClosed) => Err(TransportError::Refused {
-            reason: "the server closed the connection without a word".to_string(),
+            reason: "link: the server closed the connection without a word".to_string(),
         }),
         other => other,
     }
@@ -989,7 +990,7 @@ mod tests {
     #[test]
     fn every_message_flows_its_own_way_only() {
         // The server's words at the server, the client's words at the client: each one ends
-        // the connection, because an interval refuses both directions of nonsense. The
+        // the connection, because the wire refuses nonsense in both directions. The
         // letter's own test above is the first of these; here are the rest.
         let tick_state = Message::TickState {
             header: crate::protocol::TickStateHeader {

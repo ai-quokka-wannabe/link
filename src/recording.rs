@@ -225,6 +225,7 @@ impl Replayer {
         })
     }
 
+    /// The header the recording opened with: the contract, the world and where it began.
     #[must_use]
     pub fn header(&self) -> &RecordingHeader {
         &self.header
@@ -245,7 +246,7 @@ mod tests {
     use super::*;
     use crate::protocol::{CreatureState, TickStateHeader, Welcome};
 
-    fn scratch(name: &str) -> std::path::PathBuf {
+    fn scratch(name: &str) -> crate::scratch::Scratch {
         crate::scratch::scratch(&format!("link-disk-test-{name}.disk"))
     }
 
@@ -299,7 +300,6 @@ mod tests {
         }
         assert!(matches!(replay.poll(), Ok(Some(Message::Bye))));
         assert!(matches!(replay.poll(), Err(TransportError::PeerClosed)), "the end of the file is the peer closing");
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -320,10 +320,49 @@ mod tests {
             Err(TransportError::Refused { reason }) => assert!(reason.contains("different world"), "{reason}"),
             other => panic!("expected a worded refusal, got {:?}", other.err()),
         }
-        std::fs::write(&path, b"not a recording at all, and long enough to be read as a header........").expect("write");
-        assert!(matches!(Replayer::open(&path, 1), Err(TransportError::Garbled(_))));
+        // A whole header's worth of bytes, so it is the magic that refuses and not the length.
+        std::fs::write(&path, [b'x'; HEADER_BYTES]).expect("write");
+        assert!(matches!(Replayer::open(&path, 1), Err(TransportError::Garbled(words)) if words.contains("magic")));
         std::fs::write(&path, b"short").expect("write");
-        assert!(matches!(Replayer::open(&path, 1), Err(TransportError::Garbled(_))));
-        let _ = std::fs::remove_file(&path);
+        assert!(matches!(Replayer::open(&path, 1), Err(TransportError::Garbled(words)) if words.contains("shorter")));
+    }
+
+    #[test]
+    fn another_contract_is_refused_naming_both_versions_or_the_modified_header() {
+        let path = scratch("contracts");
+        let write = |protocol_version: u32, fingerprint: [u8; 32]| {
+            let header = RecordingHeader {
+                protocol_version,
+                fingerprint,
+                world_fingerprint: 1,
+                start_tick: 0,
+                nominal_dt_seconds: 0.031_25,
+                start_unix_seconds: 0,
+            };
+            let mut bytes = Vec::new();
+            header.write_to(&mut bytes).expect("a header into memory");
+            assert_eq!(bytes.len(), HEADER_BYTES, "the header is exactly the bytes it is read back as");
+            std::fs::write(&path, bytes).expect("write");
+        };
+        let mut other = recorded_fingerprint();
+        other[0] ^= 0xFF;
+
+        write(PROTOCOL_VERSION - 1, other);
+        match Replayer::open(&path, 1) {
+            Err(TransportError::Refused { reason }) => {
+                assert!(reason.contains(&format!("version {}", PROTOCOL_VERSION - 1)), "{reason}");
+                assert!(reason.contains(&format!("version {PROTOCOL_VERSION}")), "{reason}");
+            }
+            other => panic!("expected a worded refusal, got {:?}", other.err()),
+        }
+
+        write(PROTOCOL_VERSION, other);
+        match Replayer::open(&path, 1) {
+            Err(TransportError::Refused { reason }) => assert!(reason.contains("modified lnk_protocol.h"), "{reason}"),
+            other => panic!("expected a worded refusal, got {:?}", other.err()),
+        }
+
+        write(PROTOCOL_VERSION, recorded_fingerprint());
+        assert!(Replayer::open(&path, 1).is_ok(), "this build's own contract opens");
     }
 }

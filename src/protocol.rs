@@ -69,7 +69,7 @@ pub const FRAME_HEADER_BYTES: usize = 3;
 /// The framing's own ceiling: length is a `u16`, so no payload can exceed this.
 pub const FRAME_PAYLOAD_LIMIT: usize = 65_535;
 
-/// The most creatures one TICK_STATE may carry. A cap rather than a target — 256 rows of 188
+/// `LNK_TICK_STATE_MAX_CREATURES`: the most creatures one TICK_STATE may carry. A cap rather than a target — 256 rows of 188
 /// bytes are 48,128; with the header and a full larder of food the largest legal TICK_STATE is
 /// 49,680 bytes against the framing's 65,535 ceiling.
 pub const TICK_STATE_MAX_CREATURES: u32 = 256;
@@ -90,10 +90,6 @@ pub const ODOUR_READINGS: usize = (AMPHIDS * ODOUR_RECEPTORS) as usize;
 
 /// Message types as they appear in the frame header's third byte. Zero is invalid,
 /// deliberately: a zeroed buffer read as a message refuses loudly instead of meaning something.
-///
-/// `Rez`'s payload layout is not defined yet — it must flatten `TglCreatureDesc`, and that
-/// flattening is designed against the flagship's validator as its first consumer. The number is
-/// reserved so nothing else ever takes it.
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MessageType {
@@ -268,17 +264,22 @@ pub struct RezMaterial {
     pub transmission: f32,
 }
 
-/// The three caps of the one variable-size client input. The material cap is the one most
-/// likely to be forgotten — it guards the slot space every triangle indexes into.
+// The three caps of the one variable-size client input. The material cap is the one most
+// likely to be forgotten — it guards the slot space every triangle indexes into.
+
+/// `LNK_REZ_MAX_VERTICES`: the most [`RezVertex`] rows one REZ may carry.
 pub const REZ_MAX_VERTICES: u32 = 1_024;
+/// `LNK_REZ_MAX_TRIANGLES`: the most [`RezTriangle`] rows one REZ may carry.
 pub const REZ_MAX_TRIANGLES: u32 = 2_048;
+/// `LNK_REZ_MAX_MATERIALS`: the most [`RezMaterial`] rows one REZ may carry - the slot space
+/// every triangle's material index points into.
 pub const REZ_MAX_MATERIALS: u32 = 16;
 
-/// The most segments one creature's chain may have, the head counted: a chain is the head -
+/// `LNK_SEGMENTS_MAX`: the most segments one creature's chain may have, the head counted: a chain is the head -
 /// today's rigid body - and up to seven trailing segments the world places along the head's
 /// recorded path (protocol v7; TOPOLOGY.md § The chain). Eight is a worm of eight icosahedra,
 /// and with every pose twenty bytes and, since v12, a full larder of food rows, a full
-/// TICK_STATE is 49,680 bytes - the larger legal frame, comfortably under the framing's ceiling.
+/// TICK_STATE is 49,680 bytes - the largest legal frame, comfortably under the framing's ceiling.
 pub const SEGMENTS_MAX: u32 = 8;
 /// The trailing segments a [`CreatureState`] row carries: every segment but the head.
 pub const TRAILING_SEGMENTS_MAX: usize = (SEGMENTS_MAX - 1) as usize;
@@ -359,8 +360,8 @@ pub struct TickStateHeader {
     pub food_count: u32,
 }
 
-/// ACTIONS, creature host to server: the Program's staged intent for a future tick — the twelve
-/// bytes of `TglActions` plus the address, and the previous tick's twelve piggybacked beside
+/// ACTIONS, creature host to server: the Program's staged intent for a future tick — the forty
+/// bytes of `TglActions` plus the address, and the previous tick's forty piggybacked beside
 /// them so one lost or late message loses nothing. The server accepts through the window
 /// `[N, N+1)`, latest per (creature, tick) wins, dedupe makes the piggyback free; silence rules
 /// and [`ACTIONS_REPEAT_TICKS`] are documented in full on the C header and in TOPOLOGY.md.
@@ -414,11 +415,15 @@ pub struct Event {
 /// declare - the letter must be able to carry every contact the body feels.
 pub const CONTACTS_MAX: u32 = 16;
 
-/// One contact a body felt this tick: where, and the impulse delivered there. Twenty-four bytes.
+/// One contact a body felt this tick, in the body frame exactly as the Program ABI's `TglContact`
+/// hands it to a brain: where, the impulse delivered there, the face's normal, how deep the body
+/// stood past it, and the slip. Fifty-two bytes.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Contact {
+    /// Metres, body frame.
     pub position: [f32; 3],
+    /// Newton-seconds, body frame - the direction the body was pushed.
     pub impulse: [f32; 3],
     /// Unit, world frame: which way the face pushes.
     pub normal: [f32; 3],
@@ -522,8 +527,9 @@ pub struct Pong {
 }
 
 /// The exact payload size a fixed-size message must have — not a maximum: a frame whose length
-/// differs is refused before any copy. `None` for the two messages whose size is not a single
-/// number: TICK_STATE (header plus rows, rule on [`TickStateHeader`]) and REZ (layout reserved).
+/// differs is refused before any copy. `None` for the three messages whose size is not a single
+/// number: TICK_STATE (header plus rows, rule on [`TickStateHeader`]), REZ (header plus rows,
+/// rule on [`Rez`]) and PROPRIOCEPTION (header plus contacts, rule on [`Proprioception`]).
 /// BYE is fixed at zero: a courtesy carries nothing.
 #[must_use]
 pub const fn exact_payload_bytes(message: MessageType) -> Option<usize> {
@@ -566,7 +572,7 @@ const _: () = assert!(size_of::<Actions>() == 8 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 7 
 const _: () = assert!(size_of::<Event>() == 8 + 12 + 4 + 4 + 1 + 3 && size_of::<Event>() == 32);
 const _: () = assert!(size_of::<Derez>() == 8 + 4 + 4 && size_of::<Derez>() == 16);
 const _: () = assert!(size_of::<Refused>() == 8 + 4 + 1 + 3 && size_of::<Refused>() == 16);
-const _: () = assert!(size_of::<Contact>() == 52);
+const _: () = assert!(size_of::<Contact>() == 12 + 12 + 12 + 4 + 12 && size_of::<Contact>() == 52);
 const _: () = assert!(size_of::<Proprioception>() == 8 + 4 + 1 + 3 + 12 + 28 + 28 + 4 + 4 + ODOUR_READINGS * 4 + 4 && size_of::<Proprioception>() == 160);
 const _: () = assert!(size_of::<Proprioception>() + CONTACTS_MAX as usize * size_of::<Contact>() <= FRAME_PAYLOAD_LIMIT);
 const _: () = assert!(size_of::<Ping>() == 8 && size_of::<Pong>() == 8);
@@ -591,6 +597,7 @@ mod tests {
         assert_eq!(exact_payload_bytes(MessageType::Ping), Some(8));
         assert_eq!(exact_payload_bytes(MessageType::Pong), Some(8));
         assert_eq!(exact_payload_bytes(MessageType::Bye), Some(0));
+        assert_eq!(exact_payload_bytes(MessageType::Proprioception), None);
         assert_eq!(exact_payload_bytes(MessageType::Refused), Some(16));
     }
 
@@ -703,6 +710,49 @@ mod tests {
             ("LNK_EVENT_FOOD_GONE", EventKind::FoodGone),
         ] {
             assert!(header.contains(&format!("#define {name} {}u", kind as u8)), "{name} drifted");
+        }
+        // The numbers every byte on the wire is judged by: the frame, the magic, every message
+        // type, both roles and every refusal reason - each spelt once in each language.
+        assert!(
+            header.contains(&format!("#define LNK_FRAME_HEADER_BYTES {FRAME_HEADER_BYTES}u")),
+            "LNK_FRAME_HEADER_BYTES drifted"
+        );
+        assert!(
+            header.contains(&format!("#define LNK_FRAME_PAYLOAD_LIMIT {FRAME_PAYLOAD_LIMIT}u")),
+            "LNK_FRAME_PAYLOAD_LIMIT drifted"
+        );
+        for (index, byte) in MAGIC.iter().enumerate() {
+            assert!(
+                header.contains(&format!("#define LNK_PROTOCOL_MAGIC_BYTE_{index} 0x{byte:02X}u")),
+                "LNK_PROTOCOL_MAGIC_BYTE_{index} drifted"
+            );
+        }
+        for (name, message) in [
+            ("LNK_MSG_HELLO", MessageType::Hello),
+            ("LNK_MSG_WELCOME", MessageType::Welcome),
+            ("LNK_MSG_REZ", MessageType::Rez),
+            ("LNK_MSG_TICK_STATE", MessageType::TickState),
+            ("LNK_MSG_ACTIONS", MessageType::Actions),
+            ("LNK_MSG_EVENT", MessageType::Event),
+            ("LNK_MSG_DEREZ", MessageType::Derez),
+            ("LNK_MSG_PING", MessageType::Ping),
+            ("LNK_MSG_PONG", MessageType::Pong),
+            ("LNK_MSG_BYE", MessageType::Bye),
+            ("LNK_MSG_PROPRIOCEPTION", MessageType::Proprioception),
+            ("LNK_MSG_REFUSED", MessageType::Refused),
+        ] {
+            assert!(header.contains(&format!("#define {name} {}u", message as u8)), "{name} drifted");
+        }
+        for (name, role) in [("LNK_ROLE_SPECTATOR", Role::Spectator), ("LNK_ROLE_CREATURE_HOST", Role::CreatureHost)] {
+            assert!(header.contains(&format!("#define {name} {}u", role as u8)), "{name} drifted");
+        }
+        for (name, reason) in [
+            ("LNK_REFUSED_OWNED", RefusalReason::Owned),
+            ("LNK_REFUSED_FULL", RefusalReason::Full),
+            ("LNK_REFUSED_CROWDED", RefusalReason::Crowded),
+            ("LNK_REFUSED_BOUNDS", RefusalReason::Bounds),
+        ] {
+            assert!(header.contains(&format!("#define {name} {}u", reason as u8)), "{name} drifted");
         }
     }
 

@@ -166,7 +166,7 @@ jobs:
             # sign, attest and publish a library whose tests fail - and the attestation would then
             # vouch for the provenance of an untested artefact.
             - name: Test release build
-              run: cargo test --release
+              run: cargo test --locked --release
 
             - name: Check the Link protocol version was bumped
               run: python3 tools/check_protocol_version.py check

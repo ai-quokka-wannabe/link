@@ -75,7 +75,7 @@ sequenceDiagram
 
     Note over H,MC: Handshake
     H->>MC: magic LNK1, then HELLO (version, fingerprints, role)
-    alt the fingerprints match
+    alt the fingerprints match, protocol and world
         MC->>H: WELCOME (current tick, tick length, client id)
         MC->>H: REZ of every creature already living
     else they do not
@@ -125,8 +125,8 @@ What the picture cannot show:
   and a spectator never does.
 - **BYE is a courtesy, not a contract.** A power cut sends no BYE; an end that hears nothing for ten
   seconds declares the other dead, and a dead host's creatures stay in the world on the neutral reflex.
-- **Refusals before WELCOME are text, not frames** - bad magic, a wrong fingerprint, an invalid role -
-  because they happen before the two ends have agreed they speak the same frames.
+- **Refusals before WELCOME are text, not frames** - bad magic, a wrong fingerprint, an invalid role, a
+  different world - because they happen before the two ends have agreed they speak the same frames.
 
 ---
 
