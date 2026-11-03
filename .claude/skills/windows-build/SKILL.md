@@ -46,3 +46,11 @@ alone (tron-grid-lite `.claude/CLAUDE.md` names the variable and the path shape)
 
 - PowerShell 5.1 has no `&&`; Git Bash mangles `rev:path` and `/c/...` arguments - use PowerShell for those.
 - An agent's builds and scratch go under `%TEMP%` and are deleted before reporting.
+- **A build folder's cache can silently turn Release into Debug.** On 2026-11-03 the desk's
+  `build/windows-msvc` caches (tron-grid-lite, rc-worm) held an empty `CMAKE_CXX_FLAGS_RELEASE`: "Release"
+  compiled with no `/O2` and no `/DNDEBUG`, so the Grid ran unoptimised with Vulkan validation on, and every
+  timing measured on it was wrong. Before trusting a local Release, `findstr CMAKE_CXX_FLAGS_RELEASE
+  build\<preset>\CMakeCache.txt` must show `/O2 /Ob2 /DNDEBUG`; if not, `cmake --preset <preset> --fresh`
+  (it rebuilds the cache and deletes nothing). CI configures fresh and is never affected.
+- MSVC's `std::this_thread::sleep_for(1ms)` sleeps about **15.5 ms** on Windows (the default timer resolution);
+  Rust's `thread::sleep` is precise (~1.6 ms). Measured, not assumed - and for #170 it turned out not to matter.
