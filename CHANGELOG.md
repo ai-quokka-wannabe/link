@@ -451,6 +451,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A consumer's build uses the locked dependencies, and shell scripts keep LF.** `CMakeLists.txt` ran
+  `cargo build --release` without `--locked`, so tron-grid-lite and master-control could build Link against
+  dependencies `Cargo.lock` never recorded; it now passes `--locked`, as CI and the release already did.
+  `.gitattributes` gains `*.sh text eol=lf`: with `core.autocrlf` on Windows, `check-toolchain-pin.sh` checked out
+  with CRLF and Git Bash refused to run it.
+
 - **An audit of the whole tree, the minor and the cosmetic included.** The maintainer's ask: fix everything, and read
   every warning the builds and tests print - and there were none to read: build, clippy, rustdoc with and without
   private items, and a test run all print nothing but their results. What the reading found instead:

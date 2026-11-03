@@ -47,11 +47,12 @@ if(NOT CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 endif()
 
 # cargo is its own dependency tracker and a fraction of a second when nothing changed, so the
-# target simply always runs it.
+# target simply always runs it - `--locked`, as CI and the release do, so every consumer's build
+# uses exactly the dependencies Cargo.lock records and a stale lock fails loudly instead.
 add_custom_target(link_library ALL
-    COMMAND ${LNK_CARGO_EXECUTABLE} build --release
+    COMMAND ${LNK_CARGO_EXECUTABLE} build --release --locked
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    COMMENT "Building Link (cargo build --release)"
+    COMMENT "Building Link (cargo build --release --locked)"
     VERBATIM
 )
 
