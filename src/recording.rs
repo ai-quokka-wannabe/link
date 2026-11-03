@@ -246,9 +246,7 @@ mod tests {
     use crate::protocol::{CreatureState, TickStateHeader, Welcome};
 
     fn scratch(name: &str) -> std::path::PathBuf {
-        let mut path = std::env::temp_dir();
-        path.push(format!("link-disk-test-{name}-{}.disk", std::process::id()));
-        path
+        crate::scratch::scratch(&format!("link-disk-test-{name}.disk"))
     }
 
     #[test]
@@ -309,8 +307,7 @@ mod tests {
         let climbing = std::path::PathBuf::from("../somewhere/else.disk");
         assert!(matches!(Recorder::create(&climbing, 1, 0, 0.031_25, 0), Err(TransportError::Refused { .. })));
         assert!(matches!(Replayer::open(&climbing, 1), Err(TransportError::Refused { .. })));
-        let mut not_a_disk = std::env::temp_dir();
-        not_a_disk.push("link-not-a-disk.txt");
+        let not_a_disk = crate::scratch::scratch("link-not-a-disk.txt");
         assert!(matches!(Recorder::create(&not_a_disk, 1, 0, 0.031_25, 0), Err(TransportError::Refused { .. })));
         assert!(!not_a_disk.exists(), "a refused path is never touched");
     }

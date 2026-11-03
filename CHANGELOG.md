@@ -451,6 +451,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The tests stop asking the environment where to write.** Their Disk files went to `std::env::temp_dir()`, which
+  reads `TMP`, and code scanning counts an environment variable as user input - so every path the tests built, and
+  the production `File::create` / `File::open` those paths reached, raised `rust/path-injection` (alerts #12-#19),
+  reopening under new numbers after every edit above them. A test-only `scratch()` now names one folder under the
+  crate's `target/`, fixed at compile time from `CARGO_MANIFEST_DIR`. A transport test's failure message no longer
+  prints the peer's words (`rust/log-injection`, #20). No behaviour outside the tests changes.
+
 - **The linter's regular expressions are the patched ones.** markdownlint 0.42.0 pins re2js 2.8.6, which has a
   quadratic-time denial of service in lookbehind matching (Dependabot #9 in link, #8 in master-control and the
   siblings' own); `package.json` overrides it to 2.8.7, the patch release. The linter passes as before.
