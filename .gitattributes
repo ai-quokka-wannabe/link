@@ -1,2 +1,6 @@
 # automatically normalise line endings to the user's Git preferences
 * text=auto
+
+# shell scripts always check out with LF: bash refuses a CRLF script, and core.autocrlf on Windows
+# would otherwise hand Git Bash exactly that
+*.sh text eol=lf
