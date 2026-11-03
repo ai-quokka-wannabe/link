@@ -2035,8 +2035,7 @@ mod tests {
     #[test]
     fn a_disk_written_through_the_table_replays_through_it_and_refuses_what_a_server_would() {
         let table = vtable();
-        let mut path = std::env::temp_dir();
-        path.push(format!("link-abi-disk-{}.disk", std::process::id()));
+        let path = crate::scratch::scratch("link-abi-disk.disk");
         let c_path = CString::new(path.to_string_lossy().to_string()).expect("path");
 
         let mut status: LnkStatus = -1;

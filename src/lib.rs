@@ -25,4 +25,6 @@ pub mod abi;
 pub mod codec;
 pub mod protocol;
 pub mod recording;
+#[cfg(test)]
+mod scratch;
 pub mod transport;

@@ -1178,10 +1178,14 @@ mod tests {
         });
 
         let verdict = connect(address, &local_hello(Role::CreatureHost, WORLD + 1), PATIENCE);
-        let Err(TransportError::Refused { reason }) = verdict else {
-            panic!("a WELCOME from another world must be refused in words, got {verdict:?}");
+        // The failure message names only which way it went wrong, never the peer's words: what
+        // came off the wire is not ours to print.
+        let reason = match verdict {
+            Err(TransportError::Refused { reason }) => reason,
+            Err(_) => panic!("a WELCOME from another world must be refused in words, not with another error"),
+            Ok(_) => panic!("a WELCOME from another world must be refused, and it was accepted"),
         };
-        assert!(reason.contains("different worlds"), "got: {reason}");
+        assert!(reason.contains("different worlds"), "the refusal must say the worlds differ");
         server.join().expect("server thread");
     }
 
