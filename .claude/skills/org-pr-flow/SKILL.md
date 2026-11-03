@@ -42,3 +42,15 @@ four together, and add every process lesson to **Hard-won**.
 - Chained shell commands committed past a failing linter: check the linter said "0 issues" before committing.
 - A failed required check after dismissals needs a re-run (an empty commit, or `gh run rerun`).
 - Conflicts after a sibling PR merged: rebase on `main`, rebuild, rerun the tests - do not resolve by eye.
+  Parallel PRs nearly always meet in `CHANGELOG.md` at the top of `### Fixed`: keep both entries, a blank line
+  between, and lint. A PR the ruleset reports as BEHIND but not conflicting: `gh api -X PUT
+  repos/<org>/<repo>/pulls/<n>/update-branch` (GitHub's merge commit is signed).
+- **A dismissal request filed from the maintainer's account cannot be approved by that account** (the button
+  greys out), and link and rc-worm require approval. Fix the code so the alert closes as fixed instead.
+- **Tests never build paths from `std::env::temp_dir()`:** it reads `TMP`, CodeQL counts that as user input,
+  and every production `File::create` the path reaches is flagged too (link#53, master-control#78). Use a
+  test-only scratch under the crate's `target/` from `env!("CARGO_MANIFEST_DIR")` (`src/scratch.rs` in link and
+  master-control) or `env!("CARGO_TARGET_TMPDIR")` in integration tests. Never print read-back file contents
+  in an assertion message either (`rust/log-injection`).
+- Parallel deep-dive agents cost about 3k tokens a fix; brief them to put the CHANGELOG entry in its own last
+  commit, and never to use `temp_dir()` in tests.

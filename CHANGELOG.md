@@ -451,6 +451,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The shared skills learn the day's lessons.** `windows-build` says how to catch a stale CMake cache that turns
+  Release into an unoptimised validation build, `org-pr-flow` how parallel PRs, self-filed dismissals and
+  `temp_dir()` in tests go wrong, and `live-world` (where present) how to measure a life's timing - mirrored
+  verbatim across the repositories.
+
 - **A consumer's build uses the locked dependencies, and shell scripts keep LF.** `CMakeLists.txt` ran
   `cargo build --release` without `--locked`, so tron-grid-lite and master-control could build Link against
   dependencies `Cargo.lock` never recorded; it now passes `--locked`, as CI and the release already did.
