@@ -266,6 +266,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The rotation sense in the letter: protocol v14, client ABI 12.** The ruling of tron-grid-lite
+  `docs/PERCEPTION.md` § Imperfection at the body's own senses (2026-11-04): `angular_velocity` was the one
+  body sense the Grid still derived itself, from the yaw rate in `TICK_STATE`, so it moves into the world's
+  letter beside the specific force. `LnkProprioception` gains `float angular_velocity[3]` at offset 28 -
+  radians per second, body frame, right-handed, what semicircular canals read, finite always - and loses
+  the four-byte `reserved1` tail, so the letter is 168 bytes with no padding: `joint_angles` at 40,
+  `joint_torques` 68, `contact_count` 96, `intake` 100, `odour` 104. Both ends refuse a non-finite
+  angular velocity as they refuse a non-finite force. The struct reaches consumers through
+  `LnkProprioceptionView` and `send_proprioception`, so `LNK_CLIENT_ABI_VERSION` is 12. Companions:
+  master-control mirrors the struct, composes the field and fills it in every letter; the flagship reads
+  it from the letter instead of deriving it.
+
 - **The world's reflection attenuation in WELCOME, and no non-finite float anywhere: protocol v13,
   client ABI 11.** The two rulings of tron-grid-lite `docs/TOPOLOGY.md` § The protocol (2026-11-03,
   link#56). `LnkWelcome` grows from 24 bytes to 32: `float reflection_attenuation` at offset 24 - the
