@@ -105,7 +105,8 @@ contact's face and the slide's sound, v7 the chain, v8 a refusal by name, v9 the
 ABI 9), v10 every joint's angle as proprioception, v11 pitch on every pose and the servo's torque
 in the letter, v12 food on the Grid - its rows in the tick, its going as an event - and intake and
 smell in the letter (client ABI 10), v13 the world's reflection attenuation in WELCOME and a
-non-finite float refused in every message (client ABI 11). Each step is a [CHANGELOG.md](CHANGELOG.md) entry; the design
+non-finite float refused in every message (client ABI 11), v14 the rotation sense in the letter
+(client ABI 12). Each step is a [CHANGELOG.md](CHANGELOG.md) entry; the design
 behind each is the flagship's TOPOLOGY (for v12 its CHEMORECEPTION) and Master Control's TODO.
 
 ## Open

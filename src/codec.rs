@@ -726,10 +726,7 @@ fn decode_proprioception(payload: &[u8]) -> Result<Message, DecodeError> {
     if payload[13..16] != [0u8; 3] {
         return Err(DecodeError::ReservedNotZero);
     }
-    if payload[156..160] != [0u8; 4] {
-        return Err(DecodeError::ReservedNotZero);
-    }
-    let count = read_u32(payload, 84);
+    let count = read_u32(payload, 96);
     let rows_by_length = (payload.len() - PROPRIOCEPTION_HEADER_BYTES) / CONTACT_BYTES;
     if count as usize != rows_by_length {
         return Err(DecodeError::ContactsLengthMismatch { count, rows_by_length });
@@ -738,18 +735,23 @@ fn decode_proprioception(payload: &[u8]) -> Result<Message, DecodeError> {
     if specific_force.iter().any(|axis| !axis.is_finite()) {
         return Err(DecodeError::ProprioceptionNotFinite);
     }
-    let joint_angles = read_f32x7(payload, 28);
+    // v14: the rotation sense, judged exactly as the force is.
+    let angular_velocity = [read_f32(payload, 28), read_f32(payload, 32), read_f32(payload, 36)];
+    if angular_velocity.iter().any(|axis| !axis.is_finite()) {
+        return Err(DecodeError::ProprioceptionNotFinite);
+    }
+    let joint_angles = read_f32x7(payload, 40);
     if joint_angles.iter().any(|angle| !angle.is_finite()) {
         return Err(DecodeError::ProprioceptionNotFinite);
     }
-    let joint_torques = read_f32x7(payload, 56);
+    let joint_torques = read_f32x7(payload, 68);
     if joint_torques.iter().any(|torque| !torque.is_finite()) {
         return Err(DecodeError::ProprioceptionNotFinite);
     }
-    let intake = read_f32(payload, 88);
+    let intake = read_f32(payload, 100);
     let mut odour = [0.0f32; ODOUR_READINGS];
     for (index, reading) in odour.iter_mut().enumerate() {
-        *reading = read_f32(payload, 92 + index * 4);
+        *reading = read_f32(payload, 104 + index * 4);
     }
     match judge_chemoreception(intake, &odour) {
         Ok(()) => {}
@@ -779,12 +781,12 @@ fn decode_proprioception(payload: &[u8]) -> Result<Message, DecodeError> {
             grounded,
             reserved0: [0; 3],
             specific_force,
+            angular_velocity,
             joint_angles,
             joint_torques,
             contact_count: count,
             intake,
             odour,
-            reserved1: [0; 4],
         },
         contacts,
     })
@@ -1243,10 +1245,11 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             if header.grounded > 1 {
                 return Err(EncodeError::InvalidGrounded(header.grounded));
             }
-            if header.reserved0 != [0; 3] || header.reserved1 != [0; 4] {
+            if header.reserved0 != [0; 3] {
                 return Err(EncodeError::ReservedNotZero);
             }
             if header.specific_force.iter().any(|axis| !axis.is_finite())
+                || header.angular_velocity.iter().any(|axis| !axis.is_finite())
                 || header.joint_angles.iter().any(|angle| !angle.is_finite())
                 || header.joint_torques.iter().any(|torque| !torque.is_finite())
                 || contacts.iter().any(|contact| contact_values(contact).any(|value| !value.is_finite()))
@@ -1267,6 +1270,9 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             for axis in header.specific_force {
                 out.extend_from_slice(&axis.to_le_bytes());
             }
+            for axis in header.angular_velocity {
+                out.extend_from_slice(&axis.to_le_bytes());
+            }
             for angle in header.joint_angles {
                 out.extend_from_slice(&angle.to_le_bytes());
             }
@@ -1278,7 +1284,6 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             for reading in header.odour {
                 out.extend_from_slice(&reading.to_le_bytes());
             }
-            out.extend_from_slice(&[0; 4]);
             for contact in contacts {
                 for value in contact_values(contact) {
                     out.extend_from_slice(&value.to_le_bytes());
@@ -1445,13 +1450,13 @@ mod tests {
                 grounded: u8::from(contacts > 0),
                 reserved0: [0; 3],
                 specific_force: [0.0, 9.81, -0.5],
+                angular_velocity: [0.75, -1.25, 2.5],
                 joint_angles: [0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7],
                 joint_torques: [1.5, -2.5, 3.5, -4.5, 0.5, -0.25, 5.0],
                 contact_count: contacts,
                 intake: 0.125,
                 // Both amphids, every reading distinct, the two ends of the range among them.
                 odour: std::array::from_fn(|index| index as f32 / 15.0),
-                reserved1: [0; 4],
             },
             contacts: (0..contacts)
                 .map(|index| Contact {
@@ -1834,15 +1839,15 @@ mod tests {
     fn the_letters_chemoreception_is_refused_by_name_both_ways() {
         let frame = frame_of(&sample_proprioception(2));
         let payload = &frame[FRAME_HEADER_BYTES..];
-        // Decode side: intake at 88, the sixteen readings from 92.
+        // Decode side: intake at 100, the sixteen readings from 104.
         for (offset, value, refusal) in [
-            (88usize, -0.001f32, DecodeError::IntakeNegative),
-            (88, f32::NAN, DecodeError::ProprioceptionNotFinite),
-            (88, f32::INFINITY, DecodeError::ProprioceptionNotFinite),
-            (92, -0.01, DecodeError::OdourOutOfRange { index: 0 }),
-            (92 + 4 * 7, 1.01, DecodeError::OdourOutOfRange { index: 7 }),
-            (92 + 4 * 8, 2.0, DecodeError::OdourOutOfRange { index: 8 }),
-            (92 + 4 * 15, f32::NAN, DecodeError::ProprioceptionNotFinite),
+            (100usize, -0.001f32, DecodeError::IntakeNegative),
+            (100, f32::NAN, DecodeError::ProprioceptionNotFinite),
+            (100, f32::INFINITY, DecodeError::ProprioceptionNotFinite),
+            (104, -0.01, DecodeError::OdourOutOfRange { index: 0 }),
+            (104 + 4 * 7, 1.01, DecodeError::OdourOutOfRange { index: 7 }),
+            (104 + 4 * 8, 2.0, DecodeError::OdourOutOfRange { index: 8 }),
+            (104 + 4 * 15, f32::NAN, DecodeError::ProprioceptionNotFinite),
         ] {
             let mut poisoned = payload.to_vec();
             poisoned[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -1850,9 +1855,9 @@ mod tests {
         }
         // The range's own ends are readings: an empty stomach, an unbound and a saturated receptor.
         let mut ends = payload.to_vec();
-        ends[88..92].copy_from_slice(&0.0f32.to_le_bytes());
-        ends[92..96].copy_from_slice(&0.0f32.to_le_bytes());
-        ends[92 + 4 * 15..92 + 4 * 16].copy_from_slice(&1.0f32.to_le_bytes());
+        ends[100..104].copy_from_slice(&0.0f32.to_le_bytes());
+        ends[104..108].copy_from_slice(&0.0f32.to_le_bytes());
+        ends[104 + 4 * 15..104 + 4 * 16].copy_from_slice(&1.0f32.to_le_bytes());
         assert!(decode(MessageType::Proprioception as u8, &ends).is_ok());
 
         // Encode side: the same refusals before a byte is written.
@@ -2169,28 +2174,79 @@ mod tests {
     }
 
     #[test]
+    fn the_rotation_sense_rides_after_the_force_and_refuses_non_finite_values() {
+        // v14: angular_velocity sits at 28..40, body frame, radians per second, bit for bit.
+        let message = sample_proprioception(1);
+        let frame = frame_of(&message);
+        let payload = &frame[FRAME_HEADER_BYTES..];
+        assert_eq!(payload.len(), 168 + 52);
+        for (axis, expected) in [0.75f32, -1.25, 2.5].into_iter().enumerate() {
+            assert_eq!(read_f32(payload, 28 + axis * 4).to_bits(), expected.to_bits(), "axis {axis}");
+        }
+        assert_eq!(decode(MessageType::Proprioception as u8, payload), Ok(message));
+
+        // Decode side: NaN and both infinities on every axis are refused by name.
+        for axis in 0..3usize {
+            for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let mut poisoned = payload.to_vec();
+                poisoned[28 + axis * 4..32 + axis * 4].copy_from_slice(&value.to_le_bytes());
+                assert_eq!(
+                    decode(MessageType::Proprioception as u8, &poisoned),
+                    Err(DecodeError::ProprioceptionNotFinite),
+                    "axis {axis} value {value}"
+                );
+            }
+        }
+
+        // Encode side: the same refusals before a byte is written.
+        let Message::Proprioception { header, contacts } = sample_proprioception(1) else {
+            unreachable!()
+        };
+        let mut out = Vec::new();
+        for axis in 0..3usize {
+            for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let mut spinning = header;
+                spinning.angular_velocity[axis] = value;
+                assert_eq!(
+                    encode(
+                        &Message::Proprioception {
+                            header: spinning,
+                            contacts: contacts.clone()
+                        },
+                        &mut out
+                    ),
+                    Err(EncodeError::ProprioceptionNotFinite),
+                    "axis {axis} value {value}"
+                );
+            }
+        }
+        assert!(out.is_empty(), "nothing is written before a refusal");
+    }
+
+    #[test]
     fn a_proprioception_is_judged_at_the_header_and_refused_by_name() {
         // Header-time: ragged, over the cap.
-        assert_eq!(check_length(PayloadRule::Proprioception, 160 + 52 * CONTACTS_MAX as usize), Ok(()));
+        assert_eq!(check_length(PayloadRule::Proprioception, 168 + 52 * CONTACTS_MAX as usize), Ok(()));
         assert!(matches!(
-            check_length(PayloadRule::Proprioception, 159),
+            check_length(PayloadRule::Proprioception, 167),
             Err(DecodeError::RaggedProprioception { .. })
         ));
         assert!(matches!(
-            check_length(PayloadRule::Proprioception, 160 + 51),
+            check_length(PayloadRule::Proprioception, 168 + 51),
             Err(DecodeError::RaggedProprioception { .. })
         ));
         assert_eq!(
-            check_length(PayloadRule::Proprioception, 160 + 52 * (CONTACTS_MAX as usize + 1)),
+            check_length(PayloadRule::Proprioception, 168 + 52 * (CONTACTS_MAX as usize + 1)),
             Err(DecodeError::ContactsOverCap { count: CONTACTS_MAX + 1 })
         );
 
         // Payload-time: a count disagreeing with the length, grounded neither 0 nor 1, reserved
-        // bytes (the head's and the tail's), a NaN in the force, in a servo angle and in a contact.
+        // bytes (the head's; since v14 there is no tail), a NaN in the force, in the rotation
+        // sense, in a servo angle and in a contact.
         let frame = frame_of(&sample_proprioception(2));
         let payload = &frame[FRAME_HEADER_BYTES..];
         let mut lying = payload.to_vec();
-        lying[84..88].copy_from_slice(&3u32.to_le_bytes());
+        lying[96..100].copy_from_slice(&3u32.to_le_bytes());
         assert_eq!(
             decode(MessageType::Proprioception as u8, &lying),
             Err(DecodeError::ContactsLengthMismatch { count: 3, rows_by_length: 2 })
@@ -2201,10 +2257,7 @@ mod tests {
         let mut reserved = payload.to_vec();
         reserved[14] = 1;
         assert_eq!(decode(MessageType::Proprioception as u8, &reserved), Err(DecodeError::ReservedNotZero));
-        let mut tail = payload.to_vec();
-        tail[157] = 1;
-        assert_eq!(decode(MessageType::Proprioception as u8, &tail), Err(DecodeError::ReservedNotZero));
-        for offset in [16usize, 28 + 4 * 3, 56 + 4 * 6, 160 + 4, 160 + 52 + 44] {
+        for offset in [16usize, 28, 28 + 4 * 2, 40 + 4 * 3, 68 + 4 * 6, 168 + 4, 168 + 52 + 44] {
             let mut poisoned = payload.to_vec();
             poisoned[offset..offset + 4].copy_from_slice(&f32::NAN.to_le_bytes());
             assert_eq!(
@@ -2292,10 +2345,34 @@ mod tests {
             ),
             Err(EncodeError::ProprioceptionNotFinite)
         );
-        let mut tail = header;
-        tail.reserved1 = [0, 0, 1, 0];
+        let mut dizzy = header;
+        dizzy.angular_velocity[2] = f32::NAN;
         assert_eq!(
-            encode(&Message::Proprioception { header: tail, contacts }, &mut out),
+            encode(
+                &Message::Proprioception {
+                    header: dizzy,
+                    contacts: contacts.clone()
+                },
+                &mut out
+            ),
+            Err(EncodeError::ProprioceptionNotFinite)
+        );
+        let mut spun = header;
+        spun.angular_velocity[0] = f32::NEG_INFINITY;
+        assert_eq!(
+            encode(
+                &Message::Proprioception {
+                    header: spun,
+                    contacts: contacts.clone()
+                },
+                &mut out
+            ),
+            Err(EncodeError::ProprioceptionNotFinite)
+        );
+        let mut head = header;
+        head.reserved0 = [0, 1, 0];
+        assert_eq!(
+            encode(&Message::Proprioception { header: head, contacts }, &mut out),
             Err(EncodeError::ReservedNotZero)
         );
         assert!(out.is_empty(), "nothing is written before a refusal");

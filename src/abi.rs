@@ -98,7 +98,7 @@ impl End {
 
 /// `LNK_CLIENT_ABI_VERSION`: bumped whenever the vtable or its rules change. The twin lives in
 /// `lnk_client.h`, and a test holds the two together.
-pub const LNK_CLIENT_ABI_VERSION: u32 = 11;
+pub const LNK_CLIENT_ABI_VERSION: u32 = 12;
 
 pub type LnkStatus = i32;
 
@@ -1927,6 +1927,8 @@ mod tests {
             grounded: 1,
             reserved0: [0; 3],
             specific_force: [0.0, 9.81, 0.0],
+            // v14: a turn the canals read, distinct per axis so a swapped slot shows.
+            angular_velocity: [0.125, -0.5, 1.5],
             joint_angles: [0.0; 7],
             joint_torques: [0.0; 7],
             contact_count: 2,
@@ -1934,7 +1936,6 @@ mod tests {
             // a swapped slot shows across the ABI.
             intake: 0.25,
             odour: std::array::from_fn(|index| 0.05 * index as f32),
-            reserved1: [0; 4],
         };
 
         let client_thread = std::thread::spawn(move || {
@@ -2106,12 +2107,12 @@ mod tests {
             grounded: 1,
             reserved0: [0; 3],
             specific_force: [0.0, 9.81, 0.0],
+            angular_velocity: [0.0, 0.0, 0.0],
             joint_angles: [0.0; 7],
             joint_torques: [0.0; 7],
             contact_count: 0,
             intake: 0.0,
             odour: [0.0; 16],
-            reserved1: [0; 4],
         };
         assert_eq!((table.send_proprioception)(disk, &raw const letter, std::ptr::null()), LNK_OK);
         let mut view = unsafe { std::mem::zeroed::<MessageView>() };
