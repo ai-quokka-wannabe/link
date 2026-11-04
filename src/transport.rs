@@ -943,12 +943,12 @@ mod tests {
                 grounded: 1,
                 reserved0: [0; 3],
                 specific_force: [0.0, 9.81, 0.0],
+                angular_velocity: [0.0; 3],
                 joint_angles: [0.0; 7],
                 joint_torques: [0.0; 7],
                 contact_count: 0,
                 intake: 0.0,
                 odour: [0.0; 16],
-                reserved1: [0; 4],
             },
             contacts: Vec::new(),
         };

@@ -42,7 +42,7 @@ extern "C"
 /*! Bumped whenever this table or its rules change. lnkGetClientVTable refuses any other
     number, so a consumer built against a stale copy of this header is told at load time
     rather than corrupted at call time. */
-#define LNK_CLIENT_ABI_VERSION 11u
+#define LNK_CLIENT_ABI_VERSION 12u
 
 /*
     Statuses. Zero is success and only success; everything else names its failure. No function
@@ -106,7 +106,8 @@ typedef struct LnkRezView {
 } LnkRezView;
 
 /*! A received PROPRIOCEPTION: the header by value, the contacts borrowed from the library
-    until the next poll on this connection, or close - exactly as the tick's rows. */
+    until the next poll on this connection, or close - exactly as the tick's rows. Since ABI 12
+    (protocol v14) the letter is 168 bytes and carries angular_velocity after specific_force. */
 typedef struct LnkProprioceptionView {
     LnkProprioception proprioception;
     const LnkContact* contacts; /*!< contact_count rows, library-owned. */
@@ -271,7 +272,8 @@ typedef struct LnkClientVTable {
         then header->contact_count rows read from `contacts`. The count is validated against
         LNK_CONTACTS_MAX before a single row is read; a zero count never touches the pointer.
         Since protocol v12 the header carries intake and odour too, judged as the receiving end
-        judges them (intake non-negative, every reading in [0, 1], all finite).
+        judges them (intake non-negative, every reading in [0, 1], all finite). Since protocol
+        v14 (ABI 12) it carries angular_velocity too, refused unless finite as the force is.
         Refused with LNK_BAD_ARGUMENT on a connection this end dialled (a client never sends
         it), on a null header, and on a count with no rows behind it. */
     LnkStatus (*send_proprioception)(LnkClient* connection, const LnkProprioception* proprioception, const LnkContact* contacts);

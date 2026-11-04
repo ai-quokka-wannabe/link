@@ -50,7 +50,7 @@ extern "C"
     carries the header's fingerprint rather than this number, so two ends disagreeing about the
     bytes are refused even when they agree about the number; the number exists for the
     human-readable refusal. */
-#define LNK_PROTOCOL_VERSION 13u
+#define LNK_PROTOCOL_VERSION 14u
 
 /*! The port Master Control listens on when nobody names another - a default and only a
     default: the client's positional argument carries any host and port, and Master Control
@@ -445,13 +445,17 @@ typedef struct LnkContact {
     sending half refuses to stage it on a client-held connection. Since v12 it also carries
     chemoreception: what the body swallowed this tick and what its two amphids smell - each
     reading a receptor's bound fraction, never a concentration, a position or a direction
-    (tron-grid-lite docs/CHEMORECEPTION.md). One hundred and sixty bytes. */
+    (tron-grid-lite docs/CHEMORECEPTION.md). Since v14 it carries the rotation sense too: the
+    angular velocity the body's semicircular canals read, composed by the world as the specific
+    force is, so the host derives nothing (tron-grid-lite docs/PERCEPTION.md). One hundred and
+    sixty-eight bytes, no padding. */
 typedef struct LnkProprioception {
     uint64_t tick;
     uint32_t creature_id;
     uint8_t grounded;           /*!< 1 when the feet touch the ground this tick, else 0. */
     uint8_t reserved0[3];       /*!< Always zero. Named so the asserts can count it. */
     float specific_force[3];    /*!< Metres per second squared, BODY frame - what an otolith reads; {0, +9.81, 0} at rest. */
+    float angular_velocity[3];  /*!< Radians per second, BODY frame, right-handed - what semicircular canals read; {0, 0, 0} at rest. Finite always. */
     /*! The angle each servo holds this tick, radians, joint k between segments k and k + 1 in the
         sign LnkActions::joint_targets asks in, within a turn; segment_count - 1 meaningful, the rest
         zero, all zero for a body of one segment. The encoder's reading - what the joint did, not
@@ -471,7 +475,6 @@ typedef struct LnkProprioception {
         nose measures - saturating, noisy, never a concentration or a direction; the Program
         infers where food is from how this changes as its body moves. */
     float odour[LNK_AMPHIDS * LNK_ODOUR_RECEPTORS];
-    uint8_t reserved1[4];       /*!< Always zero: rounds the letter to its alignment. Named so the asserts can count it. */
 } LnkProprioception;
 
 /*! DEREZ, server to every client: the creature leaves the world at this tick. A leave is a
@@ -616,17 +619,18 @@ LNK_STATIC_ASSERT(sizeof(LnkEvent) == 32u, "LnkEvent must be 32 bytes: tick, pla
 LNK_STATIC_ASSERT(sizeof(LnkDerez) == 16u, "LnkDerez must be 16 bytes: tick, id, reserved.");
 LNK_STATIC_ASSERT(sizeof(LnkRefused) == 16u, "LnkRefused must be 16 bytes: tick, id, reason, reserved.");
 LNK_STATIC_ASSERT(sizeof(LnkContact) == 52u, "LnkContact must be 52 bytes: position, impulse, normal, depth, slip.");
-LNK_STATIC_ASSERT(sizeof(LnkProprioception) == 160u,
-                  "LnkProprioception must be 160 bytes: tick, id, grounded, reserved, force, seven servo angles, seven servo torques, count, intake, sixteen odour readings, reserved.");
+LNK_STATIC_ASSERT(sizeof(LnkProprioception) == 168u,
+                  "LnkProprioception must be 168 bytes: tick, id, grounded, reserved, force, angular velocity, seven servo angles, seven servo torques, count, intake, sixteen odour readings.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkContact, position) + LNK_MEMBER_BYTES(LnkContact, impulse) + LNK_MEMBER_BYTES(LnkContact, normal)
                           + LNK_MEMBER_BYTES(LnkContact, depth) + LNK_MEMBER_BYTES(LnkContact, slip)
                       == sizeof(LnkContact),
                   "LnkContact has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkProprioception, tick) + LNK_MEMBER_BYTES(LnkProprioception, creature_id) + LNK_MEMBER_BYTES(LnkProprioception, grounded)
                           + LNK_MEMBER_BYTES(LnkProprioception, reserved0) + LNK_MEMBER_BYTES(LnkProprioception, specific_force)
+                          + LNK_MEMBER_BYTES(LnkProprioception, angular_velocity)
                           + LNK_MEMBER_BYTES(LnkProprioception, joint_angles) + LNK_MEMBER_BYTES(LnkProprioception, joint_torques)
                           + LNK_MEMBER_BYTES(LnkProprioception, contact_count) + LNK_MEMBER_BYTES(LnkProprioception, intake)
-                          + LNK_MEMBER_BYTES(LnkProprioception, odour) + LNK_MEMBER_BYTES(LnkProprioception, reserved1)
+                          + LNK_MEMBER_BYTES(LnkProprioception, odour)
                       == sizeof(LnkProprioception),
                   "LnkProprioception has padding: a member changed width.");
 LNK_STATIC_ASSERT(sizeof(LnkProprioception) + LNK_CONTACTS_MAX * sizeof(LnkContact) <= 65535u,

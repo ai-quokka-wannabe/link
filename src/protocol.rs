@@ -35,7 +35,7 @@ compile_error!("The Link protocol is little-endian on the wire; a big-endian hos
 /// `LNK_PROTOCOL_VERSION`: bumped whenever any declaration changes meaning or layout. The
 /// handshake carries the header's fingerprint rather than this number; the number exists for
 /// the human-readable refusal.
-pub const PROTOCOL_VERSION: u32 = 13;
+pub const PROTOCOL_VERSION: u32 = 14;
 
 /// `LNK_DEFAULT_PORT`: where Master Control listens when nobody names another port. A default
 /// and only a default. The number is the owner's: 30702, from JA-307020 — Tron's program
@@ -447,7 +447,8 @@ pub struct Contact {
 /// Every tick after that tick's TICK_STATE: the specific force, whether the feet are on the
 /// ground, the angle every servo holds and the torque it holds it with, and `contact_count`
 /// [`Contact`] rows in the same frame; since v12 also what the body swallowed and what its two
-/// amphids smell. One hundred and sixty bytes.
+/// amphids smell; since v14 the rotation sense, `angular_velocity`, beside the specific force,
+/// so the host derives nothing. One hundred and sixty-eight bytes, no padding.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Proprioception {
@@ -457,7 +458,13 @@ pub struct Proprioception {
     pub grounded: u8,
     /// Always zero.
     pub reserved0: [u8; 3],
+    /// Metres per second squared, BODY frame - what an otolith reads; `{0, +9.81, 0}` at rest.
+    /// Finite always.
     pub specific_force: [f32; 3],
+    /// Radians per second, BODY frame, right-handed - what semicircular canals read;
+    /// `{0, 0, 0}` at rest. Composed by the world as the specific force is (protocol v14).
+    /// Finite always.
+    pub angular_velocity: [f32; 3],
     /// The angle each servo holds this tick, radians, joint `k` between segments `k` and
     /// `k + 1` in the sign [`Actions::joint_targets`] asks in, within a turn;
     /// `segment_count - 1` meaningful, the rest zero, all zero for a body of one segment.
@@ -476,9 +483,6 @@ pub struct Proprioception {
     /// Bound fraction per receptor type, `[0, 1]`, finite: left amphid `0..8`, right `8..16`.
     /// What a nose measures - never a concentration, a position or a direction.
     pub odour: [f32; ODOUR_READINGS],
-    /// Always zero: the four bytes that round the letter to its alignment, named so
-    /// nothing on the wire is left unwritten.
-    pub reserved1: [u8; 4],
 }
 
 /// DEREZ, server to every client: the creature leaves the world at this tick.
@@ -583,7 +587,20 @@ const _: () = assert!(size_of::<Event>() == 8 + 12 + 4 + 4 + 1 + 3 && size_of::<
 const _: () = assert!(size_of::<Derez>() == 8 + 4 + 4 && size_of::<Derez>() == 16);
 const _: () = assert!(size_of::<Refused>() == 8 + 4 + 1 + 3 && size_of::<Refused>() == 16);
 const _: () = assert!(size_of::<Contact>() == 12 + 12 + 12 + 4 + 12 && size_of::<Contact>() == 52);
-const _: () = assert!(size_of::<Proprioception>() == 8 + 4 + 1 + 3 + 12 + 28 + 28 + 4 + 4 + ODOUR_READINGS * 4 + 4 && size_of::<Proprioception>() == 160);
+const _: () = assert!(size_of::<Proprioception>() == 8 + 4 + 1 + 3 + 12 + 12 + 28 + 28 + 4 + 4 + ODOUR_READINGS * 4 && size_of::<Proprioception>() == 168);
+const _: () = assert!(
+    std::mem::offset_of!(Proprioception, tick) == 0
+        && std::mem::offset_of!(Proprioception, creature_id) == 8
+        && std::mem::offset_of!(Proprioception, grounded) == 12
+        && std::mem::offset_of!(Proprioception, reserved0) == 13
+        && std::mem::offset_of!(Proprioception, specific_force) == 16
+        && std::mem::offset_of!(Proprioception, angular_velocity) == 28
+        && std::mem::offset_of!(Proprioception, joint_angles) == 40
+        && std::mem::offset_of!(Proprioception, joint_torques) == 68
+        && std::mem::offset_of!(Proprioception, contact_count) == 96
+        && std::mem::offset_of!(Proprioception, intake) == 100
+        && std::mem::offset_of!(Proprioception, odour) == 104
+);
 const _: () = assert!(size_of::<Proprioception>() + CONTACTS_MAX as usize * size_of::<Contact>() <= FRAME_PAYLOAD_LIMIT);
 const _: () = assert!(size_of::<Ping>() == 8 && size_of::<Pong>() == 8);
 const _: () = assert!(
@@ -661,7 +678,7 @@ mod tests {
         assert_eq!(EventKind::Vocalisation as u8, 1);
         assert_eq!(EventKind::Scratch as u8, 2);
         assert_eq!(EventKind::FoodGone as u8, 3);
-        assert_eq!(PROTOCOL_VERSION, 13);
+        assert_eq!(PROTOCOL_VERSION, 14);
         assert_eq!(DEFAULT_PORT, 30_702);
     }
 
@@ -796,8 +813,11 @@ mod tests {
     #[test]
     fn the_letter_carries_intake_and_two_amphids_of_eight_receptors() {
         // v12: the letter grows from 96 to 160 bytes - intake, sixteen bound fractions, and a
-        // four-byte reserve that rounds it to its alignment.
-        assert_eq!(size_of::<Proprioception>(), 160);
+        // four-byte reserve that rounds it to its alignment. v14: the rotation sense takes twelve
+        // bytes after the force and the reserve goes, so 168 bytes with nothing unnamed.
+        assert_eq!(size_of::<Proprioception>(), 168);
+        assert_eq!(std::mem::offset_of!(Proprioception, angular_velocity), 28);
+        assert_eq!(std::mem::offset_of!(Proprioception, odour), 104);
         assert_eq!(ODOUR_READINGS, 16);
         assert_eq!(size_of::<FoodState>(), 24);
         assert!(size_of::<Proprioception>() + CONTACTS_MAX as usize * size_of::<Contact>() <= FRAME_PAYLOAD_LIMIT);

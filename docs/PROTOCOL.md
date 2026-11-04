@@ -1,6 +1,6 @@
 # The Wire, Drawn
 
-A picture book of the Link protocol, version 13. The contract of record is the C header
+A picture book of the Link protocol, version 14. The contract of record is the C header
 [`include/lnk/lnk_protocol.h`](../include/lnk/lnk_protocol.h): it pins every byte, and when this page
 and the header disagree, the header is right. What the messages *mean* - the tick lifecycle, the trust
 stance, the deferred list - is ruled in the flagship's
@@ -53,7 +53,7 @@ match their own counts exactly. A frame that does not fit is refused whole, neve
 | 8 | PING | either direction | 8 |
 | 9 | PONG | either direction, answering a PING | 8 |
 | 10 | BYE | either direction | 0 |
-| 11 | PROPRIOCEPTION | server to the one host that owns the creature | 160 + 52 per contact |
+| 11 | PROPRIOCEPTION | server to the one host that owns the creature | 168 + 52 per contact |
 | 12 | REFUSED | server to the one host whose REZ it did not honour | 16 |
 
 Type 0 is invalid, deliberately, so a zeroed buffer read as a message refuses loudly. An EVENT is one
@@ -129,6 +129,8 @@ What the picture cannot show:
 - **An EVENT is never load-bearing state.** A client that misses one has missed a sound, not the world.
 - **PROPRIOCEPTION is a letter, not a broadcast:** only the host that owns the creature receives it,
   and a spectator never does.
+- **The body's rotation sense is the world's to compose** (since v14): `angular_velocity` rides in the
+  letter beside the specific force, so the host derives nothing from TICK_STATE.
 - **BYE is a courtesy, not a contract.** A power cut sends no BYE; an end that hears nothing for ten
   seconds declares the other dead, and a dead host's creatures stay in the world on the neutral reflex.
 - **Refusals before WELCOME are text, not frames** - bad magic, a wrong fingerprint, an invalid role, a
@@ -153,3 +155,23 @@ A creature's row carries its head's pose, velocity and voice, then its chain: ho
 and the poses of up to seven trailing ones, in a fixed array so every row is the same size. REZ and
 PROPRIOCEPTION follow the same pattern - a fixed header, then counted rows - and their exact rules sit
 beside their structs in the header.
+
+## Inside a PROPRIOCEPTION
+
+The owner's letter: a 168-byte header with no padding and no reserved tail, then `contact_count`
+rows of `LnkContact`, 52 bytes each, at most `LNK_CONTACTS_MAX`. Every float in it is finite or the
+frame is refused.
+
+| Field | Offset | Bytes | Meaning |
+| --- | ---: | ---: | --- |
+| `tick` | 0 | 8 | The tick this body felt |
+| `creature_id` | 8 | 4 | Whose body |
+| `grounded` | 12 | 1 | 1 when the feet touch the ground, else 0 |
+| `reserved0` | 13 | 3 | Always zero |
+| `specific_force` | 16 | 12 | Metres per second squared, body frame - what an otolith reads |
+| `angular_velocity` | 28 | 12 | Radians per second, body frame, right-handed - what semicircular canals read (since v14) |
+| `joint_angles` | 40 | 28 | Seven servo angles, radians |
+| `joint_torques` | 68 | 28 | Seven servo torques, newton-metres |
+| `contact_count` | 96 | 4 | Rows that follow |
+| `intake` | 100 | 4 | What the body swallowed this tick |
+| `odour` | 104 | 64 | Sixteen bound fractions, left amphid then right |
