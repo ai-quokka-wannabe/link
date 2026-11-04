@@ -35,7 +35,7 @@ compile_error!("The Link protocol is little-endian on the wire; a big-endian hos
 /// `LNK_PROTOCOL_VERSION`: bumped whenever any declaration changes meaning or layout. The
 /// handshake carries the header's fingerprint rather than this number; the number exists for
 /// the human-readable refusal.
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// `LNK_DEFAULT_PORT`: where Master Control listens when nobody names another port. A default
 /// and only a default. The number is the owner's: 30702, from JA-307020 — Tron's program
@@ -195,7 +195,9 @@ pub struct Hello {
 
 /// WELCOME, server to client, the acceptance of a HELLO. After it the server sends the REZ of
 /// every live creature and then the next TICK_STATE — late join is not a special case. The
-/// world fingerprint travels back too: the skew check bites in both directions.
+/// world fingerprint travels back too: the skew check bites in both directions. Since v13 it
+/// also carries the world's [`reflection_attenuation`](Welcome::reflection_attenuation), which
+/// every client adopts from the server rather than from the fingerprint.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Welcome {
@@ -207,6 +209,14 @@ pub struct Welcome {
     pub client_id: u32,
     /// [`world_fingerprint`] over the server's [`WorldDefinition`].
     pub world_fingerprint: u64,
+    /// The fraction of radiance and of acoustic energy a surface returns at each specular
+    /// bounce, `[0, 1]`, finite: one number for the Grid's surfaces and every creature's body,
+    /// owned by Master Control (protocol v13). Not part of the world fingerprint - `HELLO` is
+    /// sent before a client could know a value the server chose at launch - so it travels
+    /// here, and the codec refuses a value non-finite or outside `[0, 1]` both ways.
+    pub reflection_attenuation: f32,
+    /// Always zero. Counted rather than left as invisible alignment padding.
+    pub reserved0: [u8; 4],
 }
 
 /// REZ, both directions: a creature enters the world. The header; then `vertex_count`
@@ -553,7 +563,7 @@ pub const fn exact_payload_bytes(message: MessageType) -> Option<usize> {
 // whole struct's size, so a silently grown padding byte fails the build here exactly as it
 // fails it there.
 const _: () = assert!(size_of::<Hello>() == 4 + 32 + 1 + 3 + 8 && size_of::<Hello>() == 48);
-const _: () = assert!(size_of::<Welcome>() == 8 + 4 + 4 + 8 && size_of::<Welcome>() == 24);
+const _: () = assert!(size_of::<Welcome>() == 8 + 4 + 4 + 8 + 4 + 4 && size_of::<Welcome>() == 32);
 const _: () = assert!(size_of::<WorldDefinition>() == 10 * 4 && size_of::<WorldDefinition>() == 40);
 const _: () = assert!(size_of::<Rez>() == 12 * 4 && size_of::<Rez>() == 48);
 const _: () = assert!(size_of::<SegmentPose>() == 12 + 4 + 4 && size_of::<SegmentPose>() == 20);
@@ -588,7 +598,7 @@ mod tests {
     #[test]
     fn every_fixed_message_declares_its_exact_size() {
         assert_eq!(exact_payload_bytes(MessageType::Hello), Some(48));
-        assert_eq!(exact_payload_bytes(MessageType::Welcome), Some(24));
+        assert_eq!(exact_payload_bytes(MessageType::Welcome), Some(32));
         assert_eq!(exact_payload_bytes(MessageType::Rez), None);
         assert_eq!(exact_payload_bytes(MessageType::TickState), None);
         assert_eq!(exact_payload_bytes(MessageType::Actions), Some(96));
@@ -651,7 +661,7 @@ mod tests {
         assert_eq!(EventKind::Vocalisation as u8, 1);
         assert_eq!(EventKind::Scratch as u8, 2);
         assert_eq!(EventKind::FoodGone as u8, 3);
-        assert_eq!(PROTOCOL_VERSION, 12);
+        assert_eq!(PROTOCOL_VERSION, 13);
         assert_eq!(DEFAULT_PORT, 30_702);
     }
 

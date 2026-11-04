@@ -133,6 +133,16 @@ pub enum DecodeError {
     InvalidGrounded(u8),
     /// A force, servo, intake, odour or contact value that is not finite.
     ProprioceptionNotFinite,
+    /// A WELCOME whose dt or reflection attenuation is not finite (protocol v13).
+    WelcomeNotFinite,
+    /// A WELCOME whose reflection attenuation is finite but outside `[0, 1]`: a surface
+    /// returns a fraction of what reaches it, never more and never less than nothing.
+    ReflectionAttenuationOutOfRange,
+    /// An ACTIONS intent or servo target that is not finite (protocol v13). The world clamps
+    /// what is finite; a NaN has no clamp, so it never crosses the wire.
+    ActionsNotFinite,
+    /// An EVENT position or strength that is not finite (protocol v13).
+    EventNotFinite,
     /// A role byte that is neither spectator nor creature host.
     InvalidRole(u8),
     /// An event kind byte no v1 end emits.
@@ -263,6 +273,11 @@ pub enum EncodeError {
     },
     InvalidGrounded(u8),
     ProprioceptionNotFinite,
+    /// The v13 refusals, sending side - exactly what decode refuses.
+    WelcomeNotFinite,
+    ReflectionAttenuationOutOfRange,
+    ActionsNotFinite,
+    EventNotFinite,
 }
 
 /// What a type byte's payload may look like, answerable from the three header bytes alone —
@@ -436,17 +451,29 @@ pub fn decode(type_byte: u8, payload: &[u8]) -> Result<Message, DecodeError> {
         PayloadRule::Proprioception => decode_proprioception(payload),
         PayloadRule::Exact(_) => match type_byte {
             t if t == MessageType::Hello as u8 => decode_hello(payload),
-            t if t == MessageType::Welcome as u8 => Ok(Message::Welcome(Welcome {
-                current_tick: read_u64(payload, 0),
-                nominal_dt_seconds: read_f32(payload, 8),
-                client_id: read_u32(payload, 12),
-                world_fingerprint: read_u64(payload, 16),
-            })),
+            t if t == MessageType::Welcome as u8 => {
+                if payload[28..32] != [0; 4] {
+                    return Err(DecodeError::ReservedNotZero);
+                }
+                let welcome = Welcome {
+                    current_tick: read_u64(payload, 0),
+                    nominal_dt_seconds: read_f32(payload, 8),
+                    client_id: read_u32(payload, 12),
+                    world_fingerprint: read_u64(payload, 16),
+                    reflection_attenuation: read_f32(payload, 24),
+                    reserved0: [0; 4],
+                };
+                match judge_welcome(&welcome) {
+                    WelcomeVerdict::Valid => Ok(Message::Welcome(welcome)),
+                    WelcomeVerdict::NotFinite => Err(DecodeError::WelcomeNotFinite),
+                    WelcomeVerdict::OutOfRange => Err(DecodeError::ReflectionAttenuationOutOfRange),
+                }
+            }
             t if t == MessageType::Actions as u8 => {
                 if payload[92..96] != [0; 4] {
                     return Err(DecodeError::ReservedNotZero);
                 }
-                Ok(Message::Actions(Actions {
+                let actions = Actions {
                     tick: read_u64(payload, 0),
                     creature_id: read_u32(payload, 8),
                     desired_forward_speed: read_f32(payload, 12),
@@ -458,7 +485,11 @@ pub fn decode(type_byte: u8, payload: &[u8]) -> Result<Message, DecodeError> {
                     joint_targets: read_f32x7(payload, 36),
                     previous_joint_targets: read_f32x7(payload, 64),
                     reserved0: [0; 4],
-                }))
+                };
+                if actions_floats(&actions).any(|value| !value.is_finite()) {
+                    return Err(DecodeError::ActionsNotFinite);
+                }
+                Ok(Message::Actions(actions))
             }
             t if t == MessageType::Event as u8 => decode_event(payload),
             t if t == MessageType::Derez as u8 => {
@@ -634,14 +665,57 @@ fn decode_event(payload: &[u8]) -> Result<Message, DecodeError> {
     if payload[29..32] != [0u8; 3] {
         return Err(DecodeError::ReservedNotZero);
     }
-    Ok(Message::Event(Event {
+    let event = Event {
         tick: read_u64(payload, 0),
         position: [read_f32(payload, 8), read_f32(payload, 12), read_f32(payload, 16)],
         strength: read_f32(payload, 20),
         creature_id: read_u32(payload, 24),
         kind,
         reserved0: [0; 3],
-    }))
+    };
+    if event_floats(&event).any(|value| !value.is_finite()) {
+        return Err(DecodeError::EventNotFinite);
+    }
+    Ok(Message::Event(event))
+}
+
+/// What a WELCOME's two floats may be, both ways (protocol v13): finite, and the reflection
+/// attenuation a fraction in `[0, 1]`. The dt is judged finite only - its value is the world's,
+/// and the world fingerprint already pins the one the client agreed to.
+enum WelcomeVerdict {
+    Valid,
+    NotFinite,
+    OutOfRange,
+}
+
+fn judge_welcome(welcome: &Welcome) -> WelcomeVerdict {
+    if !welcome.nominal_dt_seconds.is_finite() || !welcome.reflection_attenuation.is_finite() {
+        WelcomeVerdict::NotFinite
+    } else if !(0.0..=1.0).contains(&welcome.reflection_attenuation) {
+        WelcomeVerdict::OutOfRange
+    } else {
+        WelcomeVerdict::Valid
+    }
+}
+
+/// An ACTIONS' floats in wire order, for the finiteness judgement (protocol v13).
+fn actions_floats(actions: &Actions) -> impl Iterator<Item = f32> + '_ {
+    [
+        actions.desired_forward_speed,
+        actions.desired_turn_rate,
+        actions.vocalisation_strength,
+        actions.previous_forward_speed,
+        actions.previous_turn_rate,
+        actions.previous_vocalisation,
+    ]
+    .into_iter()
+    .chain(actions.joint_targets.iter().copied())
+    .chain(actions.previous_joint_targets.iter().copied())
+}
+
+/// An EVENT's floats in wire order, for the finiteness judgement (protocol v13).
+fn event_floats(event: &Event) -> impl Iterator<Item = f32> + '_ {
+    event.position.iter().copied().chain(std::iter::once(event.strength))
 }
 
 fn decode_proprioception(payload: &[u8]) -> Result<Message, DecodeError> {
@@ -920,11 +994,21 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             out.extend_from_slice(&hello.world_fingerprint.to_le_bytes());
         }
         Message::Welcome(welcome) => {
+            if welcome.reserved0 != [0; 4] {
+                return Err(EncodeError::ReservedNotZero);
+            }
+            match judge_welcome(welcome) {
+                WelcomeVerdict::Valid => {}
+                WelcomeVerdict::NotFinite => return Err(EncodeError::WelcomeNotFinite),
+                WelcomeVerdict::OutOfRange => return Err(EncodeError::ReflectionAttenuationOutOfRange),
+            }
             frame_header(out, MessageType::Welcome, size_of::<Welcome>());
             out.extend_from_slice(&welcome.current_tick.to_le_bytes());
             out.extend_from_slice(&welcome.nominal_dt_seconds.to_le_bytes());
             out.extend_from_slice(&welcome.client_id.to_le_bytes());
             out.extend_from_slice(&welcome.world_fingerprint.to_le_bytes());
+            out.extend_from_slice(&welcome.reflection_attenuation.to_le_bytes());
+            out.extend_from_slice(&welcome.reserved0);
         }
         Message::Rez {
             header,
@@ -1106,6 +1190,9 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             if actions.reserved0 != [0; 4] {
                 return Err(EncodeError::ReservedNotZero);
             }
+            if actions_floats(actions).any(|value| !value.is_finite()) {
+                return Err(EncodeError::ActionsNotFinite);
+            }
             frame_header(out, MessageType::Actions, size_of::<Actions>());
             out.extend_from_slice(&actions.tick.to_le_bytes());
             out.extend_from_slice(&actions.creature_id.to_le_bytes());
@@ -1129,6 +1216,9 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             }
             if event.reserved0 != [0; 3] {
                 return Err(EncodeError::ReservedNotZero);
+            }
+            if event_floats(event).any(|value| !value.is_finite()) {
+                return Err(EncodeError::EventNotFinite);
             }
             frame_header(out, MessageType::Event, size_of::<Event>());
             out.extend_from_slice(&event.tick.to_le_bytes());
@@ -1443,6 +1533,8 @@ mod tests {
                 nominal_dt_seconds: 0.03125,
                 client_id: 7,
                 world_fingerprint: 0x5EED,
+                reflection_attenuation: 0.9,
+                reserved0: [0; 4],
             }),
             sample_tick_state(0),
             sample_tick_state(3),
@@ -1913,6 +2005,145 @@ mod tests {
         let reserved_offset = FRAME_HEADER_BYTES + 92;
         frame[reserved_offset] = 1;
         assert_eq!(decode(MessageType::Actions as u8, &frame[FRAME_HEADER_BYTES..]), Err(DecodeError::ReservedNotZero));
+    }
+
+    fn sample_welcome(reflection_attenuation: f32) -> Welcome {
+        Welcome {
+            current_tick: 41,
+            nominal_dt_seconds: 0.031_25,
+            client_id: 7,
+            world_fingerprint: 0x5EED,
+            reflection_attenuation,
+            reserved0: [0; 4],
+        }
+    }
+
+    /// The payload of `frame` with the four bytes at `offset` overwritten by `value`.
+    fn with_f32_at(frame: &[u8], offset: usize, value: f32) -> Vec<u8> {
+        let mut payload = frame[FRAME_HEADER_BYTES..].to_vec();
+        payload[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        payload
+    }
+
+    #[test]
+    fn a_welcome_carries_the_reflection_attenuation_bit_for_bit_at_offset_24() {
+        // v13: thirty-two bytes, the attenuation at 24 and a counted reserved word at 28.
+        for value in [0.0, 0.9, 1.0, f32::MIN_POSITIVE, 1.0 - f32::EPSILON] {
+            let original = Message::Welcome(sample_welcome(value));
+            let frame = frame_of(&original);
+            assert_eq!(frame.len(), FRAME_HEADER_BYTES + 32);
+            assert_eq!(frame[FRAME_HEADER_BYTES + 24..FRAME_HEADER_BYTES + 28], value.to_le_bytes());
+            assert_eq!(frame[FRAME_HEADER_BYTES + 28..], [0; 4]);
+            match decode(MessageType::Welcome as u8, &frame[FRAME_HEADER_BYTES..]) {
+                Ok(Message::Welcome(welcome)) => assert_eq!(welcome.reflection_attenuation.to_bits(), value.to_bits()),
+                other => panic!("expected the WELCOME back, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_welcome_whose_floats_are_not_finite_or_whose_attenuation_is_not_a_fraction_is_refused_both_ways() {
+        let valid = frame_of(&Message::Welcome(sample_welcome(0.9)));
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut out = Vec::new();
+            assert_eq!(encode(&Message::Welcome(sample_welcome(bad)), &mut out), Err(EncodeError::WelcomeNotFinite), "{bad}");
+            assert!(out.is_empty(), "a refused encode must write nothing");
+            assert_eq!(
+                decode(MessageType::Welcome as u8, &with_f32_at(&valid, 24, bad)),
+                Err(DecodeError::WelcomeNotFinite),
+                "{bad}"
+            );
+
+            let mut bent_dt = sample_welcome(0.9);
+            bent_dt.nominal_dt_seconds = bad;
+            assert_eq!(encode(&Message::Welcome(bent_dt), &mut out), Err(EncodeError::WelcomeNotFinite), "dt {bad}");
+            assert_eq!(
+                decode(MessageType::Welcome as u8, &with_f32_at(&valid, 8, bad)),
+                Err(DecodeError::WelcomeNotFinite),
+                "dt {bad}"
+            );
+        }
+        for bad in [-f32::MIN_POSITIVE, -0.01, 1.0 + f32::EPSILON, 1.01, f32::MAX] {
+            let mut out = Vec::new();
+            assert_eq!(
+                encode(&Message::Welcome(sample_welcome(bad)), &mut out),
+                Err(EncodeError::ReflectionAttenuationOutOfRange),
+                "{bad}"
+            );
+            assert!(out.is_empty(), "a refused encode must write nothing");
+            assert_eq!(
+                decode(MessageType::Welcome as u8, &with_f32_at(&valid, 24, bad)),
+                Err(DecodeError::ReflectionAttenuationOutOfRange),
+                "{bad}"
+            );
+        }
+
+        let mut reserved = sample_welcome(0.9);
+        reserved.reserved0 = [0, 0, 0, 1];
+        assert_eq!(encode(&Message::Welcome(reserved), &mut Vec::new()), Err(EncodeError::ReservedNotZero));
+        let mut payload = valid[FRAME_HEADER_BYTES..].to_vec();
+        payload[31] = 1;
+        assert_eq!(decode(MessageType::Welcome as u8, &payload), Err(DecodeError::ReservedNotZero));
+    }
+
+    #[test]
+    fn an_actions_carrying_a_non_finite_float_anywhere_is_refused_both_ways() {
+        let Some(Message::Actions(valid)) = everything().into_iter().find(|message| matches!(message, Message::Actions(_))) else {
+            unreachable!()
+        };
+        let frame = frame_of(&Message::Actions(valid));
+        // Six intents, seven targets and their seven resent: every float slot, offsets 12 to 92.
+        for slot in 0..20 {
+            for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let offset = 12 + slot * 4;
+                assert_eq!(
+                    decode(MessageType::Actions as u8, &with_f32_at(&frame, offset, bad)),
+                    Err(DecodeError::ActionsNotFinite),
+                    "slot {slot}, {bad}"
+                );
+                let mut bent = valid;
+                match slot {
+                    0 => bent.desired_forward_speed = bad,
+                    1 => bent.desired_turn_rate = bad,
+                    2 => bent.vocalisation_strength = bad,
+                    3 => bent.previous_forward_speed = bad,
+                    4 => bent.previous_turn_rate = bad,
+                    5 => bent.previous_vocalisation = bad,
+                    6..13 => bent.joint_targets[slot - 6] = bad,
+                    _ => bent.previous_joint_targets[slot - 13] = bad,
+                }
+                let mut out = Vec::new();
+                assert_eq!(encode(&Message::Actions(bent), &mut out), Err(EncodeError::ActionsNotFinite), "slot {slot}, {bad}");
+                assert!(out.is_empty(), "a refused encode must write nothing");
+            }
+        }
+    }
+
+    #[test]
+    fn an_event_carrying_a_non_finite_float_is_refused_both_ways() {
+        let Some(Message::Event(valid)) = everything().into_iter().find(|message| matches!(message, Message::Event(_))) else {
+            unreachable!()
+        };
+        let frame = frame_of(&Message::Event(valid));
+        // Three axes of the place, then the strength: offsets 8 to 24.
+        for slot in 0..4 {
+            for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                assert_eq!(
+                    decode(MessageType::Event as u8, &with_f32_at(&frame, 8 + slot * 4, bad)),
+                    Err(DecodeError::EventNotFinite),
+                    "slot {slot}, {bad}"
+                );
+                let mut bent = valid;
+                if slot < 3 {
+                    bent.position[slot] = bad;
+                } else {
+                    bent.strength = bad;
+                }
+                let mut out = Vec::new();
+                assert_eq!(encode(&Message::Event(bent), &mut out), Err(EncodeError::EventNotFinite), "slot {slot}, {bad}");
+                assert!(out.is_empty(), "a refused encode must write nothing");
+            }
+        }
     }
 
     #[test]

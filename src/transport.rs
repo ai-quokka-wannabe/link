@@ -643,6 +643,8 @@ mod tests {
             nominal_dt_seconds: 0.03125,
             client_id: 1,
             world_fingerprint: WORLD,
+            reflection_attenuation: 0.9,
+            reserved0: [0; 4],
         })
     }
 
@@ -802,6 +804,8 @@ mod tests {
                 nominal_dt_seconds: 0.031_25,
                 client_id: 1,
                 world_fingerprint: WORLD,
+                reflection_attenuation: 0.9,
+                reserved0: [0; 4],
             }))
             .expect("queue welcome");
         while !server_side.flush().expect("flush welcome") {}

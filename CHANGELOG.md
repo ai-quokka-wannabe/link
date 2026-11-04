@@ -266,6 +266,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The world's reflection attenuation in WELCOME, and no non-finite float anywhere: protocol v13,
+  client ABI 11.** The two rulings of tron-grid-lite `docs/TOPOLOGY.md` § The protocol (2026-11-03,
+  link#56). `LnkWelcome` grows from 24 bytes to 32: `float reflection_attenuation` at offset 24 - the
+  fraction of radiance and of acoustic energy a surface returns at each specular bounce, one number
+  for the Grid and every body, owned by Master Control - and a counted `reserved0[4]` at 28. It stays
+  out of the world fingerprint, which is the compiled geometry; every client adopts the server's
+  value from WELCOME instead. Both ends refuse a WELCOME whose floats are not finite, whose
+  attenuation is outside [0, 1] or whose reserved word is not zero, and refuse a NaN or an infinity
+  in ACTIONS and EVENT too, the last messages that let one through - a malformed frame, hung up on
+  like any other. The Disk keeps the value: its header gains it (format revision 2), `record_open`
+  takes it after `nominal_dt_seconds` and refuses one the WELCOME would, and `replay_open` hands it
+  back in the WELCOME it fills. The signature change makes `LNK_CLIENT_ABI_VERSION` 11.
+  `lnk_protocol.h`'s language guard now requires the C17 its rules state (`__STDC_VERSION__ >=
+  201710L`, not C11's 201112L): every consumer that compiles C - tron-grid-lite's and rc-worm's
+  Program ABI targets - already sets `C_STANDARD 17`, and the Link headers are otherwise included
+  from C++20. Companions: master-control fills the field in every WELCOME and passes it to
+  `record_open`; the flagship reads it from WELCOME (tron-grid-lite#177).
+
 - **Food on the Grid, smell in the letter: protocol v12, client ABI 10.** The owner's glowing yellow
   orbs and a sense of smell as honest as the eyes and ears (tron-grid-lite `docs/CHEMORECEPTION.md`).
   `TICK_STATE` carries the world's food after its creatures: `food_count` takes the four bytes

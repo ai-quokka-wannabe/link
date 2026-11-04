@@ -1,6 +1,6 @@
 # The Wire, Drawn
 
-A picture book of the Link protocol, version 12. The contract of record is the C header
+A picture book of the Link protocol, version 13. The contract of record is the C header
 [`include/lnk/lnk_protocol.h`](../include/lnk/lnk_protocol.h): it pins every byte, and when this page
 and the header disagree, the header is right. What the messages *mean* - the tick lifecycle, the trust
 stance, the deferred list - is ruled in the flagship's
@@ -44,7 +44,7 @@ match their own counts exactly. A frame that does not fit is refused whole, neve
 | Type | Message | Direction | Payload bytes |
 |-----:|---------|-----------|---------------|
 | 1 | HELLO | client to server, first frame after the magic | 48 |
-| 2 | WELCOME | server to client, accepting a HELLO | 24 |
+| 2 | WELCOME | server to client, accepting a HELLO | 32 |
 | 3 | REZ | creature host to server; server to every client | 48 + 12 per vertex + 16 per triangle + 32 per material |
 | 4 | TICK_STATE | server to every client, every tick | 16 + 188 per creature + 24 per orb of food |
 | 5 | ACTIONS | creature host to server | 96 |
@@ -76,7 +76,7 @@ sequenceDiagram
     Note over H,MC: Handshake
     H->>MC: magic LNK1, then HELLO (version, fingerprints, role)
     alt the fingerprints match, protocol and world
-        MC->>H: WELCOME (current tick, tick length, client id)
+        MC->>H: WELCOME (current tick, tick length, client id, reflection attenuation)
         MC->>H: REZ of every creature already living
     else they do not
         MC-->>H: one line of plain text saying why, then close
@@ -117,6 +117,12 @@ What the picture cannot show:
 
 - **Late join is not a special case.** WELCOME is followed by the REZ of every live creature and then
   the next TICK_STATE, whether the client arrived first or an hour late.
+- **WELCOME carries the world's reflection attenuation** (since v13): the fraction of light and of
+  sound a surface returns at each mirror bounce, in [0, 1], the same for the Grid and every body.
+  Master Control chooses it at launch, so it is not in the world fingerprint HELLO carries; every
+  client adopts the server's, and a replay takes it from the Disk's header.
+- **A non-finite float is a malformed frame, in every message** (since v13 in ACTIONS, EVENT and
+  WELCOME too): a NaN or an infinity is refused on both ends, and a peer that sends one is hung up on.
 - **TICK_STATE is the whole settled world, every tick** - no deltas, no acknowledgements.
 - **ACTIONS carry the previous tick's intent beside the new one**, so one lost or late message loses
   nothing. A silent network gets the last accepted intent repeated for one tick, then a zeroed coast.

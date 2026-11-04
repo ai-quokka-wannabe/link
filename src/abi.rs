@@ -98,7 +98,7 @@ impl End {
 
 /// `LNK_CLIENT_ABI_VERSION`: bumped whenever the vtable or its rules change. The twin lives in
 /// `lnk_client.h`, and a test holds the two together.
-pub const LNK_CLIENT_ABI_VERSION: u32 = 10;
+pub const LNK_CLIENT_ABI_VERSION: u32 = 11;
 
 pub type LnkStatus = i32;
 
@@ -252,6 +252,7 @@ pub struct LnkClientVTable {
         world_fingerprint: u64,
         start_tick: u64,
         nominal_dt_seconds: f32,
+        reflection_attenuation: f32,
         start_unix_seconds: u64,
         out_status: *mut LnkStatus,
         out_detail_utf8: *mut c_char,
@@ -923,6 +924,7 @@ extern "C" fn record_open_impl(
     world_fingerprint: u64,
     start_tick: u64,
     nominal_dt_seconds: f32,
+    reflection_attenuation: f32,
     start_unix_seconds: u64,
     out_status: *mut LnkStatus,
     out_detail_utf8: *mut c_char,
@@ -945,7 +947,14 @@ extern "C" fn record_open_impl(
             Ok(path) => path,
             Err(words) => return refuse(LNK_BAD_ARGUMENT, words),
         };
-        match Recorder::create(std::path::Path::new(path), world_fingerprint, start_tick, nominal_dt_seconds, start_unix_seconds) {
+        match Recorder::create(
+            std::path::Path::new(path),
+            world_fingerprint,
+            start_tick,
+            nominal_dt_seconds,
+            reflection_attenuation,
+            start_unix_seconds,
+        ) {
             Ok(recorder) => {
                 // SAFETY: as above.
                 unsafe { *out_status = LNK_OK };
@@ -994,6 +1003,8 @@ extern "C" fn replay_open_impl(
                         nominal_dt_seconds: header.nominal_dt_seconds,
                         client_id: 0,
                         world_fingerprint: header.world_fingerprint,
+                        reflection_attenuation: header.reflection_attenuation,
+                        reserved0: [0; 4],
                     };
                     *out_status = LNK_OK;
                 }
@@ -1142,6 +1153,8 @@ mod tests {
                     nominal_dt_seconds: 0.03125,
                     client_id: 9,
                     world_fingerprint: WORLD,
+                    reflection_attenuation: 0.9,
+                    reserved0: [0; 4],
                 }))
                 .expect("queue WELCOME");
             let rows = vec![
@@ -1390,6 +1403,8 @@ mod tests {
                 nominal_dt_seconds: 0.031_25,
                 client_id: 1,
                 world_fingerprint: WORLD,
+                reflection_attenuation: 0.9,
+                reserved0: [0; 4],
             };
             assert_eq!((table.send_welcome)(connection, &raw const welcome), LNK_OK);
             let mut everything_left = 0u8;
@@ -1437,6 +1452,11 @@ mod tests {
             assert!(!client.is_null());
             assert_eq!(welcome.current_tick, 900);
             assert_eq!(welcome.client_id, 4);
+            assert_eq!(
+                welcome.reflection_attenuation.to_bits(),
+                0.625f32.to_bits(),
+                "the client adopts the server's attenuation"
+            );
 
             let mut view = unsafe { std::mem::zeroed::<MessageView>() };
             let mut seen = Vec::new();
@@ -1505,7 +1525,17 @@ mod tests {
             nominal_dt_seconds: 0.031_25,
             client_id: 4,
             world_fingerprint: WORLD,
+            reflection_attenuation: 0.625,
+            reserved0: [0; 4],
         };
+        // A WELCOME the codec refuses stages nothing: the client's connect still sees the good one first.
+        for bad in [f32::NAN, f32::INFINITY, -0.5, 1.5] {
+            let refused = Welcome {
+                reflection_attenuation: bad,
+                ..welcome
+            };
+            assert_eq!((table.send_welcome)(connection, &raw const refused), LNK_BAD_ARGUMENT, "{bad}");
+        }
         assert_eq!((table.send_welcome)(connection, &raw const welcome), LNK_OK);
         let rows = [
             CreatureState {
@@ -1712,6 +1742,8 @@ mod tests {
             nominal_dt_seconds: 0.031_25,
             client_id: 1,
             world_fingerprint: WORLD,
+            reflection_attenuation: 0.9,
+            reserved0: [0; 4],
         };
         assert_eq!((table.send_welcome)(connection, &raw const welcome), LNK_OK);
         let mut everything_left = 0u8;
@@ -1831,6 +1863,8 @@ mod tests {
             nominal_dt_seconds: 0.031_25,
             client_id: 1,
             world_fingerprint: WORLD,
+            reflection_attenuation: 0.9,
+            reserved0: [0; 4],
         };
         assert_eq!((table.send_welcome)(connection, &raw const welcome), LNK_OK);
         let mut everything_left = 0u8;
@@ -1956,6 +1990,8 @@ mod tests {
             nominal_dt_seconds: 0.031_25,
             client_id: 1,
             world_fingerprint: WORLD,
+            reflection_attenuation: 0.9,
+            reserved0: [0; 4],
         };
         assert_eq!((table.send_welcome)(connection, &raw const welcome), LNK_OK);
         // The caps are judged before a row is read, here too.
@@ -2042,7 +2078,7 @@ mod tests {
         let c_path = CString::new(path.to_string_lossy().to_string()).expect("path");
 
         let mut status: LnkStatus = -1;
-        let disk = (table.record_open)(c_path.as_ptr(), WORLD, 500, 0.031_25, 1_700_000_000, &raw mut status, std::ptr::null_mut(), 0);
+        let disk = (table.record_open)(c_path.as_ptr(), WORLD, 500, 0.031_25, 0.75, 1_700_000_000, &raw mut status, std::ptr::null_mut(), 0);
         assert_eq!(status, LNK_OK);
         assert!(!disk.is_null());
 
@@ -2106,6 +2142,21 @@ mod tests {
         assert_eq!(welcome.current_tick, 500);
         assert_eq!(welcome.world_fingerprint, WORLD);
         assert_eq!(welcome.client_id, 0);
+        assert_eq!(
+            welcome.reflection_attenuation.to_bits(),
+            0.75f32.to_bits(),
+            "the Disk's replay yields the world's reflection attenuation"
+        );
+
+        // A Disk refuses an attenuation the WELCOME would refuse, before the file is touched.
+        let refused_path = crate::scratch::scratch("link-abi-disk-refused.disk");
+        let c_refused = CString::new(refused_path.to_string_lossy().to_string()).expect("path");
+        for bad in [f32::NAN, f32::NEG_INFINITY, -0.1, 1.1] {
+            let refused = (table.record_open)(c_refused.as_ptr(), WORLD, 0, 0.031_25, bad, 0, &raw mut status, std::ptr::null_mut(), 0);
+            assert!(refused.is_null(), "{bad}");
+            assert_eq!(status, LNK_REFUSED, "{bad}");
+            assert!(!refused_path.exists(), "a refused Disk is never created");
+        }
 
         // A replay has nobody to talk to.
         assert_eq!((table.send_ping)(replay, 1), LNK_BAD_ARGUMENT);
@@ -2124,7 +2175,7 @@ mod tests {
         (table.close)(replay);
 
         // Nulls are refused, never dereferenced.
-        assert!((table.record_open)(std::ptr::null(), WORLD, 0, 0.0, 0, &raw mut status, std::ptr::null_mut(), 0).is_null());
+        assert!((table.record_open)(std::ptr::null(), WORLD, 0, 0.0, 0.9, 0, &raw mut status, std::ptr::null_mut(), 0).is_null());
         assert_eq!(status, LNK_BAD_ARGUMENT);
         assert!((table.replay_open)(c_path.as_ptr(), WORLD, std::ptr::null_mut(), &raw mut status, std::ptr::null_mut(), 0).is_null());
         assert_eq!(status, LNK_BAD_ARGUMENT);

@@ -41,8 +41,9 @@ use crate::protocol::PROTOCOL_VERSION;
 use crate::transport::{FrameReader, TransportError, WriteBuffer, recorded_fingerprint};
 
 /// The recording file's opening bytes: the format and its revision, so a file of another shape
-/// refuses at the door rather than decoding as frames.
-pub const RECORDING_MAGIC: [u8; 8] = *b"DISK\0\0\0\x01";
+/// refuses at the door rather than decoding as frames. Revision 2 (protocol v13) appends the
+/// world's reflection attenuation to the header.
+pub const RECORDING_MAGIC: [u8; 8] = *b"DISK\0\0\0\x02";
 
 /// The recording header, in the order it is written: what the file speaks, where it began.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -53,9 +54,12 @@ pub struct RecordingHeader {
     pub start_tick: u64,
     pub nominal_dt_seconds: f32,
     pub start_unix_seconds: u64,
+    /// The world's reflection attenuation, as the WELCOME states it (protocol v13): a replay
+    /// hands it back in the WELCOME it fills, so a replayed world looks and sounds as it did.
+    pub reflection_attenuation: f32,
 }
 
-const HEADER_BYTES: usize = 8 + 4 + 32 + 8 + 8 + 4 + 8;
+const HEADER_BYTES: usize = 8 + 4 + 32 + 8 + 8 + 4 + 8 + 4;
 
 impl RecordingHeader {
     fn write_to(&self, sink: &mut impl Write) -> std::io::Result<()> {
@@ -65,7 +69,8 @@ impl RecordingHeader {
         sink.write_all(&self.world_fingerprint.to_le_bytes())?;
         sink.write_all(&self.start_tick.to_le_bytes())?;
         sink.write_all(&self.nominal_dt_seconds.to_le_bytes())?;
-        sink.write_all(&self.start_unix_seconds.to_le_bytes())
+        sink.write_all(&self.start_unix_seconds.to_le_bytes())?;
+        sink.write_all(&self.reflection_attenuation.to_le_bytes())
     }
 
     fn read_from(source: &mut impl Read) -> Result<RecordingHeader, TransportError> {
@@ -90,6 +95,10 @@ impl RecordingHeader {
         };
         let mut fingerprint = [0u8; 32];
         fingerprint.copy_from_slice(&bytes[12..44]);
+        let reflection_attenuation = f32::from_le_bytes([bytes[72], bytes[73], bytes[74], bytes[75]]);
+        if !is_reflection_attenuation(reflection_attenuation) {
+            return Err(TransportError::Garbled("a recording whose reflection attenuation is not a fraction in [0, 1]"));
+        }
         Ok(RecordingHeader {
             protocol_version: u32_at(8),
             fingerprint,
@@ -97,8 +106,14 @@ impl RecordingHeader {
             start_tick: u64_at(52),
             nominal_dt_seconds: f32::from_le_bytes([bytes[60], bytes[61], bytes[62], bytes[63]]),
             start_unix_seconds: u64_at(64),
+            reflection_attenuation,
         })
     }
+}
+
+/// The WELCOME's rule for the reflection attenuation, held by the Disk too: finite, in `[0, 1]`.
+fn is_reflection_attenuation(value: f32) -> bool {
+    value.is_finite() && (0.0..=1.0).contains(&value)
 }
 
 /// The judgement every Disk path passes before a file is touched: it names a `.disk`, and it
@@ -129,9 +144,24 @@ pub struct Recorder {
 
 impl Recorder {
     /// Create the file and write its header. The fingerprint is this build's own; the world
-    /// fingerprint and the start are the caller's, as a WELCOME's would be.
-    pub fn create(path: &Path, world_fingerprint: u64, start_tick: u64, nominal_dt_seconds: f32, start_unix_seconds: u64) -> Result<Recorder, TransportError> {
-        let mut file = BufWriter::new(File::create(judged_path(path)?)?);
+    /// fingerprint, the start and the reflection attenuation are the caller's, as a WELCOME's
+    /// would be - and the attenuation is judged as the codec judges a WELCOME's, before the
+    /// file is touched.
+    pub fn create(
+        path: &Path,
+        world_fingerprint: u64,
+        start_tick: u64,
+        nominal_dt_seconds: f32,
+        reflection_attenuation: f32,
+        start_unix_seconds: u64,
+    ) -> Result<Recorder, TransportError> {
+        let path = judged_path(path)?;
+        if !is_reflection_attenuation(reflection_attenuation) {
+            return Err(TransportError::Refused {
+                reason: "link: a Disk's reflection attenuation is a fraction in [0, 1]".to_string(),
+            });
+        }
+        let mut file = BufWriter::new(File::create(path)?);
         let header = RecordingHeader {
             protocol_version: PROTOCOL_VERSION,
             fingerprint: recorded_fingerprint(),
@@ -139,6 +169,7 @@ impl Recorder {
             start_tick,
             nominal_dt_seconds,
             start_unix_seconds,
+            reflection_attenuation,
         };
         header.write_to(&mut file)?;
         file.flush()?;
@@ -253,13 +284,15 @@ mod tests {
     #[test]
     fn a_recording_replays_what_was_said_in_order_and_ends_with_bye() {
         let path = scratch("roundtrip");
-        let mut recorder = Recorder::create(&path, 0xABCD, 100, 0.031_25, 1_700_000_000).expect("create");
+        let mut recorder = Recorder::create(&path, 0xABCD, 100, 0.031_25, 0.75, 1_700_000_000).expect("create");
         recorder
             .queue(&Message::Welcome(Welcome {
                 current_tick: 100,
                 nominal_dt_seconds: 0.031_25,
                 client_id: 0,
                 world_fingerprint: 0xABCD,
+                reflection_attenuation: 0.9,
+                reserved0: [0; 4],
             }))
             .expect("queue");
         recorder
@@ -290,7 +323,15 @@ mod tests {
         let mut replay = Replayer::open(&path, 0xABCD).expect("open");
         assert_eq!(replay.header().start_tick, 100);
         assert_eq!(replay.header().protocol_version, PROTOCOL_VERSION);
-        assert!(matches!(replay.poll(), Ok(Some(Message::Welcome(_)))));
+        assert_eq!(
+            replay.header().reflection_attenuation.to_bits(),
+            0.75f32.to_bits(),
+            "the header keeps the world's attenuation"
+        );
+        match replay.poll() {
+            Ok(Some(Message::Welcome(welcome))) => assert_eq!(welcome.reflection_attenuation.to_bits(), 0.9f32.to_bits()),
+            other => panic!("expected the WELCOME, got {other:?}"),
+        }
         match replay.poll() {
             Ok(Some(Message::TickState { header, states, .. })) => {
                 assert_eq!(header.tick, 101);
@@ -305,17 +346,48 @@ mod tests {
     #[test]
     fn a_disk_path_must_be_a_disk_and_must_not_climb() {
         let climbing = std::path::PathBuf::from("../somewhere/else.disk");
-        assert!(matches!(Recorder::create(&climbing, 1, 0, 0.031_25, 0), Err(TransportError::Refused { .. })));
+        assert!(matches!(Recorder::create(&climbing, 1, 0, 0.031_25, 0.9, 0), Err(TransportError::Refused { .. })));
         assert!(matches!(Replayer::open(&climbing, 1), Err(TransportError::Refused { .. })));
         let not_a_disk = crate::scratch::scratch("link-not-a-disk.txt");
-        assert!(matches!(Recorder::create(&not_a_disk, 1, 0, 0.031_25, 0), Err(TransportError::Refused { .. })));
+        assert!(matches!(Recorder::create(&not_a_disk, 1, 0, 0.031_25, 0.9, 0), Err(TransportError::Refused { .. })));
         assert!(!not_a_disk.exists(), "a refused path is never touched");
+    }
+
+    #[test]
+    fn a_disk_refuses_a_reflection_attenuation_that_is_not_a_fraction_both_ways() {
+        let path = scratch("attenuation");
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.01, 1.01] {
+            assert!(
+                matches!(Recorder::create(&path, 1, 0, 0.031_25, bad, 0), Err(TransportError::Refused { .. })),
+                "{bad} is not a reflection attenuation"
+            );
+            assert!(!path.exists(), "a refused Disk is never created");
+        }
+        for good in [0.0, 0.9, 1.0] {
+            Recorder::create(&path, 1, 0, 0.031_25, good, 0).expect("a fraction opens").close();
+            let replay = Replayer::open(&path, 1).expect("open");
+            assert_eq!(replay.header().reflection_attenuation.to_bits(), f32::to_bits(good));
+        }
+        // A header written by hand with a value no recorder would write is garbled on the way in.
+        let header = RecordingHeader {
+            protocol_version: PROTOCOL_VERSION,
+            fingerprint: recorded_fingerprint(),
+            world_fingerprint: 1,
+            start_tick: 0,
+            nominal_dt_seconds: 0.031_25,
+            start_unix_seconds: 0,
+            reflection_attenuation: f32::NAN,
+        };
+        let mut bytes = Vec::new();
+        header.write_to(&mut bytes).expect("a header into memory");
+        std::fs::write(&path, bytes).expect("write");
+        assert!(matches!(Replayer::open(&path, 1), Err(TransportError::Garbled(words)) if words.contains("reflection attenuation")));
     }
 
     #[test]
     fn another_world_and_a_wrong_magic_are_refused_in_words() {
         let path = scratch("refusals");
-        Recorder::create(&path, 1, 0, 0.031_25, 0).expect("create").close();
+        Recorder::create(&path, 1, 0, 0.031_25, 0.9, 0).expect("create").close();
         match Replayer::open(&path, 2) {
             Err(TransportError::Refused { reason }) => assert!(reason.contains("different world"), "{reason}"),
             other => panic!("expected a worded refusal, got {:?}", other.err()),
@@ -338,6 +410,7 @@ mod tests {
                 start_tick: 0,
                 nominal_dt_seconds: 0.031_25,
                 start_unix_seconds: 0,
+                reflection_attenuation: 0.9,
             };
             let mut bytes = Vec::new();
             header.write_to(&mut bytes).expect("a header into memory");
