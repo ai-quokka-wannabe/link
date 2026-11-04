@@ -44,7 +44,7 @@ fingerprint comparison, a dropped partial-write carry, a forgotten partial heade
 
 ## Etape 4 — the C ABI surface
 
-**Done, both halves; ABI version 10 today.** `include/lnk/lnk_client.h` declares the surface and `src/abi.rs`
+**Done, both halves; ABI version 11 today.** `include/lnk/lnk_client.h` declares the surface and `src/abi.rs`
 implements it: one exported symbol, `lnkGetClientVTable`, returning NULL for any version but its
 own — the flagship's `tglGetProgramVTable` refusal, reproduced — with `vtable_bytes` and
 `abi_version` as the table's first members. Behind it: connect (the whole handshake, refusals
@@ -94,7 +94,7 @@ server-held end with no peer — every `send_*` stages a frame, `flush` writes t
 `BYE` — fed by Master Control from the same per-subscriber loop as every citizen, so the file holds
 what was said in the wire's own bytes. `replay_open` reads it back as a client-held end whose
 `poll` yields the frames in order; its header (protocol fingerprint, world fingerprint, start
-tick, dt, start time) is judged as a handshake is, in the same words. The owner named it: a
+tick, dt, start time and, since v13, reflection attenuation) is judged as a handshake is, in the same words. The owner named it: a
 recording is a *Disk*, and the program that reads Disks back is *Clu*, which lives in Master
 Control.
 
@@ -104,7 +104,8 @@ The wire has since moved with its consumers' etapes rather than with etapes of i
 contact's face and the slide's sound, v7 the chain, v8 a refusal by name, v9 the servos (client
 ABI 9), v10 every joint's angle as proprioception, v11 pitch on every pose and the servo's torque
 in the letter, v12 food on the Grid - its rows in the tick, its going as an event - and intake and
-smell in the letter (client ABI 10). Each step is a [CHANGELOG.md](CHANGELOG.md) entry; the design
+smell in the letter (client ABI 10), v13 the world's reflection attenuation in WELCOME and a
+non-finite float refused in every message (client ABI 11). Each step is a [CHANGELOG.md](CHANGELOG.md) entry; the design
 behind each is the flagship's TOPOLOGY (for v12 its CHEMORECEPTION) and Master Control's TODO.
 
 ## Open

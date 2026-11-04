@@ -42,7 +42,7 @@ extern "C"
 /*! Bumped whenever this table or its rules change. lnkGetClientVTable refuses any other
     number, so a consumer built against a stale copy of this header is told at load time
     rather than corrupted at call time. */
-#define LNK_CLIENT_ABI_VERSION 10u
+#define LNK_CLIENT_ABI_VERSION 11u
 
 /*
     Statuses. Zero is success and only success; everything else names its failure. No function
@@ -175,7 +175,8 @@ typedef struct LnkClientVTable {
     /*! Stage the creature's intent for the next flush - the current tick's forty bytes and the
         previous tick's forty resent, exactly as ACTIONS on the wire. Refused with
         LNK_BAD_ARGUMENT on a connection that introduced itself as a spectator: a spectator
-        never sends ACTIONS, and the refusal starts at the sending half. */
+        never sends ACTIONS, and the refusal starts at the sending half. Since protocol v13 a
+        non-finite float anywhere in it is refused the same way, and nothing is staged. */
     LnkStatus (*send_actions)(LnkClient* client, const LnkActions* actions);
 
     /*! Stage a REZ: the header, then its counted rows read from the three arrays. Every count
@@ -238,7 +239,10 @@ typedef struct LnkClientVTable {
 
     /*! Stage the WELCOME that turns an accepted handshake into a citizen. The caller fills
         `world_fingerprint` with its own - the same value it gave listen() - because the skew
-        check bites in both directions and the client verifies what it is welcomed into. */
+        check bites in both directions and the client verifies what it is welcomed into. Since
+        ABI 11 (protocol v13) it also fills `reflection_attenuation` with the world's, and
+        `reserved0` with zeroes; a non-finite float, an attenuation outside [0, 1] or a nonzero
+        reserved byte is refused by the codec (LNK_BAD_ARGUMENT), and nothing is staged. */
     LnkStatus (*send_welcome)(LnkClient* connection, const LnkWelcome* welcome);
 
     /*! Stage a TICK_STATE: the header, then header->creature_count rows read from `states` and
@@ -250,7 +254,8 @@ typedef struct LnkClientVTable {
         (0, 1] - and a refused row stages nothing. */
     LnkStatus (*send_tick_state)(LnkClient* connection, const LnkTickStateHeader* header, const LnkCreatureState* states, const LnkFoodState* foods);
 
-    /*! Stage an EVENT - tick-stamped notification, never load-bearing state. */
+    /*! Stage an EVENT - tick-stamped notification, never load-bearing state. Since protocol v13
+        a non-finite position or strength is refused (LNK_BAD_ARGUMENT), and nothing is staged. */
     LnkStatus (*send_event)(LnkClient* connection, const LnkEvent* event);
 
     /*! Stage a DEREZ - the creature leaves the world at this tick. */
@@ -281,16 +286,18 @@ typedef struct LnkClientVTable {
         close writes BYE and closes the file - and a file that could not take the BYE (a full
         disk) ends without one, which a replay reads as the world ending in a crash: the truth.
         The path must end in .disk and never climb with '..' (LNK_REFUSED otherwise). The header names this build's protocol fingerprint
-        and the world, tick and dt given here, exactly as a WELCOME would. Master Control feeds it
+        and the world, tick, dt and reflection attenuation given here, exactly as a WELCOME would; since ABI 11 (protocol v13)
+        `reflection_attenuation` is judged as a WELCOME's is - finite, in [0, 1] - and refused (LNK_REFUSED) before any file is
+        touched. Master Control feeds it
         from the same per-subscriber loop as every citizen: the state log is what was said, in
         the wire's own bytes, and a replay viewer is a spectator that opened it. */
-    LnkClient* (*record_open)(const char* path_utf8, uint64_t world_fingerprint, uint64_t start_tick, float nominal_dt_seconds, uint64_t start_unix_seconds,
-        LnkStatus* out_status, char* out_detail_utf8, uint32_t detail_capacity_bytes);
+    LnkClient* (*record_open)(const char* path_utf8, uint64_t world_fingerprint, uint64_t start_tick, float nominal_dt_seconds, float reflection_attenuation,
+        uint64_t start_unix_seconds, LnkStatus* out_status, char* out_detail_utf8, uint32_t detail_capacity_bytes);
 
     /*! A client whose socket is a file, the reading half: open a recording and judge its header
         as a handshake is judged - another contract or another world is refused in the same words
         a server uses. `out_welcome` is filled as a server would fill it: the start tick, the dt,
-        client id 0, the world. Then poll yields the recorded frames in order, send_* are refused
+        client id 0, the world, and the reflection attenuation the recording was made with. Then poll yields the recorded frames in order, send_* are refused
         (LNK_BAD_ARGUMENT - a replay has nobody to talk to), and the end of the file answers
         LNK_PEER_CLOSED: the recording is over. */
     LnkClient* (*replay_open)(const char* path_utf8, uint64_t world_fingerprint, LnkWelcome* out_welcome, LnkStatus* out_status, char* out_detail_utf8,

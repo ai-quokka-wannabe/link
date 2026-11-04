@@ -50,7 +50,7 @@ extern "C"
     carries the header's fingerprint rather than this number, so two ends disagreeing about the
     bytes are refused even when they agree about the number; the number exists for the
     human-readable refusal. */
-#define LNK_PROTOCOL_VERSION 12u
+#define LNK_PROTOCOL_VERSION 13u
 
 /*! The port Master Control listens on when nobody names another - a default and only a
     default: the client's positional argument carries any host and port, and Master Control
@@ -188,12 +188,23 @@ typedef struct LnkHello {
 /*! WELCOME, server to client, the acceptance of a HELLO. After it the server sends the REZ of
     every live creature and then the next TICK_STATE - late join is not a special case. The
     world fingerprint travels back too, so the *client* also refuses a server whose world it
-    could not faithfully perceive - the skew check bites in both directions. */
+    could not faithfully perceive - the skew check bites in both directions.
+
+    Since v13 it also carries the world's reflection attenuation (tron-grid-lite TOPOLOGY.md
+    § The protocol, ruled 2026-11-03): the fraction of radiance and of acoustic energy a surface
+    returns at each specular bounce, one number for the Grid's surfaces and every creature's
+    body, owned by Master Control. It is deliberately not part of LnkWorldDefinition: HELLO is
+    sent before a client could know a value the server chose at launch, so every client adopts
+    the server's from here instead - and a replay from the Disk's header. Every float finite and
+    the attenuation in [0, 1], or the frame is refused, both ways. Thirty-two bytes. */
 typedef struct LnkWelcome {
-    uint64_t current_tick;      /*!< The tick the next TICK_STATE will carry or exceed. */
-    float nominal_dt_seconds;   /*!< Seconds per tick, the same number TglLibraryInfo carries. */
-    uint32_t client_id;         /*!< The server's name for this connection, echoed nowhere yet. */
-    uint64_t world_fingerprint; /*!< The vtable's world_fingerprint over the server's LnkWorldDefinition. */
+    uint64_t current_tick;        /*!< The tick the next TICK_STATE will carry or exceed. */
+    float nominal_dt_seconds;     /*!< Seconds per tick, the same number TglLibraryInfo carries. Finite. */
+    uint32_t client_id;           /*!< The server's name for this connection, echoed nowhere yet. */
+    uint64_t world_fingerprint;   /*!< The vtable's world_fingerprint over the server's LnkWorldDefinition. */
+    float reflection_attenuation; /*!< Fraction returned per specular bounce, light and sound alike, [0, 1], finite. */
+    uint8_t reserved0[4];         /*!< Always zero. Named so the asserts can count it - the alternative is
+                                       four bytes of invisible alignment padding. */
 } LnkWelcome;
 
 /*
@@ -364,7 +375,10 @@ typedef struct LnkTickStateHeader {
     the last accepted intent for up to LNK_ACTIONS_REPEAT_TICKS, then falls to zeroed coast,
     because the world must not fabricate a brake the Program never asked for. A dead host - see
     the keepalive constants - drops its creature to the zeroed neutral reflex, still embodied:
-    the world never waits. */
+    the world never waits.
+
+    Every float finite, or the frame is refused (protocol v13): the server clamps what is finite
+    into the body's bounds, and a NaN has no clamp. */
 typedef struct LnkActions {
     uint64_t tick;                 /*!< The tick this intent is staged for. */
     uint32_t creature_id;
@@ -392,7 +406,8 @@ typedef struct LnkActions {
 
 /*! EVENT, server to every client: a tick-stamped notification, never load-bearing state. The
     spectator synthesises its audio from these, and a creature host lets its hosted senses
-    hear the guests' calls through them. */
+    hear the guests' calls through them. Every float finite, or the frame is refused (protocol
+    v13). */
 typedef struct LnkEvent {
     uint64_t tick;
     float position[3];      /*!< Where it happened, metres, world space. */
@@ -511,10 +526,10 @@ typedef struct LnkPong {
 
 #if defined(__cplusplus)
     #define LNK_STATIC_ASSERT(condition, message) static_assert(condition, message)
-#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201710L
     #define LNK_STATIC_ASSERT(condition, message) _Static_assert(condition, message)
 #else
-    #error "The Link protocol requires C17 or later (C++11 or later on the C++ side). There is deliberately no pre-C11 fallback."
+    #error "The Link protocol requires C17 or later (C++11 or later on the C++ side). There is deliberately no older fallback."
 #endif
 
 #define LNK_MEMBER_BYTES(type, member) sizeof(((type*)0)->member)
@@ -524,7 +539,8 @@ LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkHello, protocol_version) + LNK_MEMBER_BYTE
                       == sizeof(LnkHello),
                   "LnkHello has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkWelcome, current_tick) + LNK_MEMBER_BYTES(LnkWelcome, nominal_dt_seconds) + LNK_MEMBER_BYTES(LnkWelcome, client_id)
-                          + LNK_MEMBER_BYTES(LnkWelcome, world_fingerprint)
+                          + LNK_MEMBER_BYTES(LnkWelcome, world_fingerprint) + LNK_MEMBER_BYTES(LnkWelcome, reflection_attenuation)
+                          + LNK_MEMBER_BYTES(LnkWelcome, reserved0)
                       == sizeof(LnkWelcome),
                   "LnkWelcome has padding: a member changed width.");
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkWorldDefinition, floor_cells) + LNK_MEMBER_BYTES(LnkWorldDefinition, floor_cell_size)
@@ -586,7 +602,7 @@ LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkPing, nonce) == sizeof(LnkPing), "LnkPing 
 LNK_STATIC_ASSERT(LNK_MEMBER_BYTES(LnkPong, nonce) == sizeof(LnkPong), "LnkPong has padding: a member changed width.");
 
 LNK_STATIC_ASSERT(sizeof(LnkHello) == 48u, "LnkHello must be 48 bytes: version, fingerprint, role, reserved, world fingerprint.");
-LNK_STATIC_ASSERT(sizeof(LnkWelcome) == 24u, "LnkWelcome must be 24 bytes: tick, dt, client id, world fingerprint.");
+LNK_STATIC_ASSERT(sizeof(LnkWelcome) == 32u, "LnkWelcome must be 32 bytes: tick, dt, client id, world fingerprint, reflection attenuation, reserved.");
 LNK_STATIC_ASSERT(sizeof(LnkWorldDefinition) == 40u, "LnkWorldDefinition must be 40 bytes: the floor's eight numbers, dt, and the standing height.");
 LNK_STATIC_ASSERT(sizeof(LnkRez) == 48u, "LnkRez must be 48 bytes: identity, the bounds, the contact budget, three counts, the chain's count and spacing, the servos' angle and torque.");
 LNK_STATIC_ASSERT(sizeof(LnkRezVertex) == 12u && sizeof(LnkRezTriangle) == 16u && sizeof(LnkRezMaterial) == 32u,
